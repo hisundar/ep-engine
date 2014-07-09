@@ -648,6 +648,10 @@ void ActiveStream::scheduleBackfill() {
             }
         }
 
+        LOG(EXTENSION_LOG_WARNING, "%s (vb %d) scheduleBackfill, curChkSeqno=%llu"
+            " backfillStart= %llu backfillEnd=%llu",
+            producer->logHeader(), vb_, curChkSeqno, backfillStart, backfillEnd);
+
         if (backfillStart <= backfillEnd) {
             ExTask task = new UprBackfill(engine, this, backfillStart, backfillEnd,
                                           Priority::TapBgFetcherPriority, 0, false);

@@ -2375,11 +2375,22 @@ public:
                                                         bucket_num);
                 cb_assert(deleted);
                 if (newCacheItem && value > 0) {
+                    if (vbucket->getState() == vbucket_state_replica) {
+                        LOG(EXTENSION_LOG_WARNING, "@@ DEL vb %d state %d key %s seq %llu\n",
+                                vbucket->getId(), vbucket->getState(), queuedItem->getKey().c_str(),
+                                queuedItem->getBySeqno());
+                    }
                     // Need to decrement the item counter again for an item that
                     // exists on DB file, but not in memory (i.e., full eviction),
                     // because we created the temp item in memory and incremented
                     // the item counter when a deletion is pushed in the queue.
                     --vbucket->ht.numTotalItems;
+                } else {
+                    if (vbucket->getState() == vbucket_state_replica) {
+                        LOG(EXTENSION_LOG_WARNING, "@~ DEL vb %d state %d key %s seq %llu\n",
+                                vbucket->getId(), vbucket->getState(), queuedItem->getKey().c_str(),
+                                queuedItem->getBySeqno());
+                    }
                 }
             }
 
@@ -2602,6 +2613,10 @@ EventuallyPersistentStore::flushOneDelOrSet(const queued_item &qi,
         rwUnderlying->set(*qi, *cb);
         return cb;
     } else {
+        if (vb->getState() == vbucket_state_replica) {
+            LOG(EXTENSION_LOG_WARNING, "##QWE DEL vb %d state %d key %s seq %llu\n",
+                    vb->getId(), vb->getState(), qi->getKey().c_str(), qi->getBySeqno());
+        }
         BlockTimer timer(&stats.diskDelHisto, "disk_delete",
                          stats.timingLog);
         PersistenceCallback *cb =
@@ -2627,6 +2642,10 @@ void EventuallyPersistentStore::queueDirty(RCPtr<VBucket> &vb,
             plh->unlock();
         }
 
+        if (vb->getState() == vbucket_state_replica) {
+            LOG(EXTENSION_LOG_WARNING, "++que DEL vb %d state %d key %s seq %llu\n",
+                    vb->getId(), vb->getState(), qi->getKey().c_str(), qi->getBySeqno());
+        }
         if (rv) {
             KVShard* shard = vbMap.getShard(vb->getId());
             shard->getFlusher()->notifyFlushEvent();
