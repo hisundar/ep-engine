@@ -725,6 +725,35 @@ form to describe when time was spent doing various things:
 | disk_vbstate_snapshot | Time spent persisting vbucket state changes    |
 | item_alloc_sizes      | Item allocation size counters (in bytes)       |
 
+The following histograms are available from "scheduler" and "runtimes"
+describing the scheduling overhead times and task runtimes incurred by various
+IO and Non-IO tasks respectively:
+
+| bg_fetcher_tasks            | histogram of scheduling overhead/task runtimes |
+| bg_fetcher_meta_tasks       | histogram of scheduling overhead/task runtimes |
+| tap_bg_fetcher_tasks        | histogram of scheduling overhead/task runtimes |
+| vkey_stat_bg_fetcher_tasks  | histogram of scheduling overhead/task runtimes |
+| warmup_tasks                | histogram of scheduling overhead/task runtimes |
+| vbucket_persist_high_tasks  | histogram of scheduling overhead/task runtimes |
+| vbucket_deletion_tasks      | histogram of scheduling overhead/task runtimes |
+| flusher_tasks               | histogram of scheduling overhead/task runtimes |
+| flush_all_tasks             | histogram of scheduling overhead/task runtimes |
+| compactor_tasks             | histogram of scheduling overhead/task runtimes |
+| statsnap_tasks              | histogram of scheduling overhead/task runtimes |
+| mutation_log_compactor_tasks| histogram of scheduling overhead/task runtimes |
+| access_scanner_tasks        | histogram of scheduling overhead/task runtimes |
+| conn_notification_tasks     | histogram of scheduling overhead/task runtimes |
+| checkpoint_remover_tasks    | histogram of scheduling overhead/task runtimes |
+| vb_memory_deletion_tasks    | histogram of scheduling overhead/task runtimes |
+| checkpoint_stats_tasks      | histogram of scheduling overhead/task runtimes |
+| item_pager_tasks            | histogram of scheduling overhead/task runtimes |
+| backfill_tasks_tasks        | histogram of scheduling overhead/task runtimes |
+| tap_resume_tasks            | histogram of scheduling overhead/task runtimes |
+| tapconnection_reaper_tasks  | histogram of scheduling overhead/task runtimes |
+| hashtable_resize_tasks      | histogram of scheduling overhead/task runtimes |
+| pending_ops_tasks           | histogram of scheduling overhead/task runtimes |
+| conn_manager_tasks          | histogram of scheduling overhead/task runtimes |
+
 ** Hash Stats
 
 Hash stats provide information on your vbucket hash tables.
@@ -956,7 +985,7 @@ rw_<Shard number>: indicating the times spent doing various things:
 
 ** Workload Raw Stats
 Some information about the number of shards and Executor pool information.
-These are available as "raw workload" stats:
+These are available as "workload" stats:
 
 | ep_workload:num_shards  | number of shards or groups of partitions     |
 | ep_workload:num_writers | number of threads that prioritize write ops  |
