@@ -98,13 +98,7 @@ void ExecutorThread::run() {
                                    diffsec*1000000 + diffusec);
 
             taskStart = gethrtime();
-            rel_time_t startReltime = ep_current_time();
             try {
-                LOG(EXTENSION_LOG_DEBUG,
-                    "%s: Run task \"%s\" id %d waketime %d",
-                getName().c_str(), currentTask->getDescription().c_str(),
-                currentTask->getId(), currentTask->waketime.tv_sec);
-
                 // Now Run the Task ....
                 bool again = currentTask->run();
 
@@ -112,10 +106,6 @@ void ExecutorThread::run() {
                 hrtime_t runtime((gethrtime() - taskStart) / 1000);
                 engine->getEpStore()->logRunTime(currentTask->getTypeId(),
                                                runtime);
-                addLogEntry(currentTask->getDescription(), q->getQueueType(),
-                            runtime, startReltime,
-                            (runtime >
-                            (hrtime_t)currentTask->maxExpectedDuration()));
                 // Check if task is run once or needs to be rescheduled..
                 if (!again || currentTask->isdead()) {
                     // release capacity back to TaskQueue
@@ -155,18 +145,6 @@ void ExecutorThread::run() {
         }
     }
     state = EXECUTOR_DEAD;
-}
-
-void ExecutorThread::addLogEntry(const std::string &desc,
-                                 const task_type_t taskType,
-                                 const hrtime_t runtime,
-                                 rel_time_t t, bool isSlowJob) {
-    TaskLogEntry tle(desc, taskType, runtime, t);
-    if (isSlowJob) {
-        slowjobs.add(tle);
-    } else {
-        tasklog.add(tle);
-    }
 }
 
 const std::string ExecutorThread::getStateName() {
