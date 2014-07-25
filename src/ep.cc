@@ -2679,7 +2679,7 @@ int EventuallyPersistentStore::flushVBucket(uint16_t vbid) {
     }
 
     if (schedule_vb_snapshot || snapshotVBState) {
-        scheduleVBSnapshot(Priority::VBucketPersistHighPriority,
+        scheduleVBSnapshot(Priority::VBucketPersistLowPriority,
                            shard->getId());
     }
 
