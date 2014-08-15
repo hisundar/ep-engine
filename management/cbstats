@@ -403,6 +403,10 @@ def stats_hash(mc, with_detail=None):
     stats_formatter(toDisplay, cmp=magic_cmp)
 
 @cmd
+def stats_dcpthreads(mc):
+    stats_formatter(stats_perform(mc, 'dcpthreads'))
+
+@cmd
 def stats_scheduler(mc):
     h = stats_perform(mc, 'scheduler')
     if h:
@@ -473,6 +477,7 @@ def main():
     c.addCommand('scheduler', stats_scheduler, 'scheduler')
     c.addCommand('runtimes', stats_runtimes, 'runtimes')
     c.addCommand('dispatcher', stats_dispatcher, 'dispatcher [logs]')
+    c.addCommand('dcpthreads', stats_dcpthreads, 'dcpthreads')
     c.addCommand('workload', stats_workload, 'workload')
     c.addCommand('failovers', stats_failovers, 'failovers [vbid]')
     c.addCommand('hash', stats_hash, 'hash [detail]')

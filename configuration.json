@@ -128,7 +128,7 @@
             "type": "bool"
         },
         "dbname": {
-            "default": "/tmp/test",
+            "default": "/tmp/ramdisk2g/test",
             "descr": "Path to on-disk storage.",
             "dynamic": false,
             "type": "std::string"

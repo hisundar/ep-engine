@@ -217,7 +217,9 @@ ENGINE_ERROR_CODE UprProducer::step(struct dcp_message_producers* producers) {
 
     size_t batchSize;
     if (streamType == DCP_REPLICA_STREAM) {
-        batchSize = 10; // a large value also terminate when buffer is full
+        batchSize = 10; // MB-11642: speedup intra-cluster replication
+    } else if (streamType == DCP_XDCR_STREAM) {
+        batchSize = 1;
     } else {
         batchSize = 1;
     }
@@ -235,6 +237,14 @@ ENGINE_ERROR_CODE UprProducer::step(struct dcp_message_producers* producers) {
         if (!resp) {
             ret = ENGINE_SUCCESS;
             break;
+        }
+
+        if (streamType == DCP_REPLICA_STREAM) {
+            stats.dcpReplicaThreads[(uint64_t)cb_thread_self()]++;
+        } else if (streamType == DCP_XDCR_STREAM) {
+            stats.dcpXDCRThreads[(uint64_t)cb_thread_self()]++;
+        } else {
+            stats.dcpXDCRThreads[(uint64_t)cb_thread_self()]++;
         }
 
         ret = ENGINE_SUCCESS;

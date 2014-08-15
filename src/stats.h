@@ -526,6 +526,11 @@ public:
     // ! Histogram of various task run times
     Histogram<hrtime_t> *taskRuntimeHisto;
 
+    // ! Histogram of various thread ids that run UprProducer step() tasks
+    unordered_map<uint64_t, size_t> dcpReplicaThreads;
+    unordered_map<uint64_t, size_t> dcpXDCRThreads;
+    unordered_map<uint64_t, size_t> dcpViewsThreads;
+
     //! Reset all stats to reasonable values.
     void reset() {
         tooYoung.store(0);

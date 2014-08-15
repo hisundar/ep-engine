@@ -45,6 +45,7 @@
 #include "tapconnmap.h"
 #include "tapthrottle.h"
 
+int incarn;
 class StatsValueChangeListener : public ValueChangedListener {
 public:
     StatsValueChangeListener(EPStats &st) : stats(st) {
@@ -974,6 +975,7 @@ void EventuallyPersistentStore::snapshotVBuckets(const Priority &priority,
         }
 
         if (priority == Priority::VBucketPersistHighPriority) {
+            LockHolder vblh(vbsetMutex);
             if (vbMap.setBucketCreation(iter->first, false)) {
                 LOG(EXTENSION_LOG_INFO, "VBucket %d created", iter->first);
             }
@@ -1080,9 +1082,11 @@ ENGINE_ERROR_CODE EventuallyPersistentStore::setVBucketState(uint16_t vbid,
             lh.unlock();
             return ENGINE_ERANGE;
         }
+        ++incarn;
         vbMap.setPersistenceCheckpointId(vbid, 0);
         vbMap.setPersistenceSeqno(vbid, 0);
         vbMap.setBucketCreation(vbid, true);
+        fprintf(stderr, "SET State incarn %d\n", incarn);
         lh.unlock();
         scheduleVBStatePersist(Priority::VBucketPersistHighPriority, vbid);
     }
@@ -1139,6 +1143,8 @@ void EventuallyPersistentStore::scheduleVBStatePersist(const Priority &priority,
         schedule_vbstate_persist[vbid].compare_exchange_strong(inverse, true)) {
         ExTask task = new VBStatePersistTask(&engine, priority, vbid, false);
         ExecutorPool::get()->schedule(task, WRITER_TASK_IDX);
+    } else {
+        fprintf(stderr, "SKIPPED SET incarn %d\n", incarn);
     }
 }
 
@@ -1212,6 +1218,7 @@ ENGINE_ERROR_CODE EventuallyPersistentStore::deleteVBucket(uint16_t vbid,
     engine.getUprConnMap().vbucketStateChanged(vbid, vbucket_state_dead);
     vbMap.removeBucket(vbid);
     lh.unlock();
+    fprintf(stderr, "DEL incarn %d\n", incarn);
     scheduleVBDeletion(vb, c);
     if (c) {
         return ENGINE_EWOULDBLOCK;
@@ -2678,10 +2685,6 @@ int EventuallyPersistentStore::flushVBucket(uint16_t vbid) {
         }
     }
 
-    if (vbMap.isBucketCreation(vbid)) {
-        return RETRY_FLUSH_VBUCKET;
-    }
-
     int items_flushed = 0;
     rel_time_t flush_start = ep_current_time();
 
@@ -2690,6 +2693,10 @@ int EventuallyPersistentStore::flushVBucket(uint16_t vbid) {
         LockHolder lh(vb_mutexes[vbid], true /*tryLock*/);
         if (!lh.islocked()) { // Try another bucket if this one is locked
             return RETRY_FLUSH_VBUCKET; // to avoid blocking flusher
+        }
+
+        if (vbMap.isBucketCreation(vbid)) {
+            return RETRY_FLUSH_VBUCKET;
         }
 
         KVStatsCallback cb(this);

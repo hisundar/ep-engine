@@ -41,6 +41,8 @@
 #include <platform/dirutils.h>
 #include <cJSON.h>
 
+extern int incarn;
+static int incn;
 #include "common.h"
 #include "couch-kvstore/couch-kvstore.h"
 #define STATWRITER_NAMESPACE couchstore_engine
@@ -564,6 +566,7 @@ bool CouchKVStore::delVBucket(uint16_t vbucket, bool recreate)
             delete cachedVBStates[vbucket];
         }
         cachedVBStates[vbucket] = (vbucket_state *) NULL;
+        fprintf(stderr, "deleted incarn %d incn = %d\n", incarn, incn);
     }
     updateDbFileMap(vbucket, 1);
     return cb.val;
@@ -959,11 +962,13 @@ bool CouchKVStore::snapshotVBucket(uint16_t vbucketId, vbucket_state &vbstate,
         // Note that max deleted seq number is maintained within CouchKVStore
         vbstate.maxDeletedSeqno = state->maxDeletedSeqno;
     } else {
+        ++incn;
         state = new vbucket_state();
         *state = vbstate;
         vb_change_type = VB_STATE_CHANGED;
         cachedVBStates[vbucketId] = state;
         notify = true;
+        fprintf(stderr, "created vbucket %d incn %d\n", incarn, incn);
     }
 
     success = setVBucketState(vbucketId, vbstate, vb_change_type, cb,
@@ -1809,6 +1814,7 @@ couchstore_error_t CouchKVStore::saveDocs(uint16_t vbid, uint64_t rev, Doc **doc
     DbInfo info;
     cb_assert(fileRev);
 
+    fprintf(stderr, "flushing incarnation %d %d\n", incarn, incn);
     Db *db = NULL;
     uint64_t newFileRev;
     errCode = openDB(vbid, fileRev, &db, 0, &newFileRev);
@@ -1865,7 +1871,9 @@ couchstore_error_t CouchKVStore::saveDocs(uint16_t vbid, uint64_t rev, Doc **doc
         }
 
         vbucket_state *state = cachedVBStates[vbid];
-        cb_assert(state);
+        if (!state) {
+            cb_assert(state);
+        }
 
         state->lastSnapStart = snapStartSeqno;
         state->lastSnapEnd = snapEndSeqno;
