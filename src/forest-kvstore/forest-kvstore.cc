@@ -95,6 +95,8 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config) :
         }
     }
 
+    dbFileName = dbFile.str();
+
     dbFile << "." << dbFileRevNum;
 
     fileConfig = fdb_get_default_config();
@@ -116,6 +118,8 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config) :
      */
     fileConfig.compress_document_body = true;
 
+    //fileConfig.wal_threshold = 0;
+
     initForestDb();
 
     status = fdb_open(&dbFileHandle, dbFile.str().c_str(), &fileConfig);
@@ -136,14 +140,14 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config) :
     }
 
     // Initialize the handle for the vbucket state information
-    status = fdb_kvs_open_default(dbFileHandle, &vbStateHandle, &kvsConfig);
+    //status = fdb_kvs_open_default(dbFileHandle, &vbStateHandle, &kvsConfig);
 
-    if (status != FDB_RESULT_SUCCESS) {
-        LOG(EXTENSION_LOG_WARNING,
-            "ForestKVStore::ForestKVStore: Opening the vbucket state KV store "
-            "instance failed with error: %s\n", fdb_error_msg(status));
-        abort();
-    }
+    //if (status != FDB_RESULT_SUCCESS) {
+    //    LOG(EXTENSION_LOG_WARNING,
+    //        "ForestKVStore::ForestKVStore: Opening the vbucket state KV store "
+    //        "instance failed with error: %s\n", fdb_error_msg(status));
+    //    abort();
+    //}
 
     cachedVBStates.reserve(maxVbuckets);
     cachedValidVBCount = 0;
@@ -273,6 +277,15 @@ void ForestKVStore::reset(uint16_t vbucketId) {
             fdb_error_msg(status));
     }
 
+    std::stringstream dbFileNameStr;
+    dbFileNameStr << dbFileName << "." << dbFileRevNum;
+    
+    fdb_file_handle *localDbFileHandle;
+    fdb_open(&localDbFileHandle, dbFileNameStr.str().c_str(), &fileConfig);
+
+    fdb_kvs_handle* vbStateHandle;
+    fdb_kvs_open_default(localDbFileHandle, &vbStateHandle, &kvsConfig);
+
     std::string stateStr = state->toJSON();
 
     if (!stateStr.empty()) {
@@ -294,6 +307,9 @@ void ForestKVStore::reset(uint16_t vbucketId) {
                 fdb_error_msg(status));
         }
     }
+
+    fdb_kvs_close(vbStateHandle);
+    fdb_close(localDbFileHandle);
 
     updateFileInfo();
 }
@@ -342,6 +358,16 @@ ENGINE_ERROR_CODE ForestKVStore::readVBState(uint16_t vbId) {
     fdb_doc* statDoc;
     sprintf(keybuf, "partition%d", vbId);
     fdb_doc_create(&statDoc, (void *)keybuf, strlen(keybuf), NULL, 0, NULL, 0);
+
+    std::stringstream dbFileNameStr;
+    dbFileNameStr << dbFileName << "." << dbFileRevNum;
+    
+    fdb_file_handle *localDbFileHandle;
+    fdb_open(&localDbFileHandle, dbFileNameStr.str().c_str(), &fileConfig);
+
+    fdb_kvs_handle* vbStateHandle;
+    fdb_kvs_open_default(localDbFileHandle, &vbStateHandle, &kvsConfig);
+
     status = fdb_get(vbStateHandle, statDoc);
 
     if (status != FDB_RESULT_SUCCESS) {
@@ -431,6 +457,8 @@ ENGINE_ERROR_CODE ForestKVStore::readVBState(uint16_t vbId) {
                                              maxCas, driftCounter,
                                              failovers);
     fdb_doc_free(statDoc);
+    fdb_kvs_close(vbStateHandle);
+    fdb_close(localDbFileHandle);
     return forestErr2EngineErr(status);
 }
 
@@ -497,6 +525,16 @@ void ForestKVStore::delVBucket(uint16_t vbucket) {
                                                 failovers);
 
     vbucket_state* state = cachedVBStates[vbucket];
+
+    std::stringstream dbFileNameStr;
+    dbFileNameStr << dbFileName << "." << dbFileRevNum;
+    
+    fdb_file_handle *localDbFileHandle;
+    fdb_open(&localDbFileHandle, dbFileNameStr.str().c_str(), &fileConfig);
+
+    fdb_kvs_handle* vbStateHandle;
+    fdb_kvs_open_default(localDbFileHandle, &vbStateHandle, &kvsConfig);  
+
     std::string stateStr = state->toJSON();
 
     if (!stateStr.empty()) {
@@ -516,6 +554,9 @@ void ForestKVStore::delVBucket(uint16_t vbucket) {
                     vbucket, fdb_error_msg(status));
         }
     }
+
+    fdb_kvs_close(vbStateHandle);
+    fdb_close(localDbFileHandle);
 
     updateFileInfo();
     cachedValidVBCount--;
@@ -780,6 +821,15 @@ bool ForestKVStore::save2forestdb() {
     uint16_t numShards = configuration.getMaxShards();
     uint16_t shardId = configuration.getShardId();
 
+    std::stringstream dbFileNameStr;
+    dbFileNameStr << dbFileName << "." << dbFileRevNum;
+    
+    fdb_file_handle *localDbFileHandle;
+    fdb_open(&localDbFileHandle, dbFileNameStr.str().c_str(), &fileConfig);
+
+    fdb_kvs_handle* vbStateHandle;
+    fdb_kvs_open_default(localDbFileHandle, &vbStateHandle, &kvsConfig);
+
     for (uint16_t vbid = shardId; vbid < maxVbuckets; vbid += numShards) {
         vbucket_state* state = cachedVBStates[vbid];
         if (state != nullptr) {
@@ -810,6 +860,9 @@ bool ForestKVStore::save2forestdb() {
             }
         }
     }
+
+    fdb_kvs_close(vbStateHandle);
+    fdb_close(localDbFileHandle);
 
     fdb_status status = fdb_commit(dbFileHandle, FDB_COMMIT_NORMAL);
     if (status != FDB_RESULT_SUCCESS) {
@@ -1214,6 +1267,15 @@ bool ForestKVStore::snapshotVBucket(uint16_t vbucketId, vbucket_state& vbstate,
     if (updateCachedVBState(vbucketId, vbstate) &&
          (options == VBStatePersist::VBSTATE_PERSIST_WITHOUT_COMMIT ||
           options == VBStatePersist::VBSTATE_PERSIST_WITH_COMMIT)) {
+        std::stringstream dbFileNameStr;
+        dbFileNameStr << dbFileName << "." << dbFileRevNum;
+
+        fdb_file_handle *localDbFileHandle = NULL;
+        fdb_open(&localDbFileHandle, dbFileNameStr.str().c_str(), &fileConfig);
+
+        fdb_kvs_handle* vbStateHandle = NULL;
+        fdb_kvs_open_default(localDbFileHandle, &vbStateHandle, &kvsConfig);
+
         std::string stateStr = cachedVBStates[vbucketId]->toJSON();
         char keybuf[20];
         fdb_doc statDoc;
@@ -1235,7 +1297,7 @@ bool ForestKVStore::snapshotVBucket(uint16_t vbucketId, vbucket_state& vbstate,
         }
 
         if (options == VBStatePersist::VBSTATE_PERSIST_WITH_COMMIT) {
-            status = fdb_commit(dbFileHandle, FDB_COMMIT_NORMAL);
+            status = fdb_commit(localDbFileHandle, FDB_COMMIT_NORMAL);
 
             if (status != FDB_RESULT_SUCCESS) {
                 LOG(EXTENSION_LOG_WARNING, "ForestKVStore::snapshotVBucket: Failed "
@@ -1244,6 +1306,9 @@ bool ForestKVStore::snapshotVBucket(uint16_t vbucketId, vbucket_state& vbstate,
                 return false;
             }
         }
+
+        fdb_kvs_close(vbStateHandle);
+        fdb_close(localDbFileHandle);
     }
 
     updateFileInfo();

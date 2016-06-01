@@ -52,7 +52,7 @@
             }
         },
         "backend": {
-            "default": "couchdb",
+            "default": "forestdb",
             "dynamic": false,
             "type": "std::string",
             "validator": {

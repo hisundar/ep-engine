@@ -367,6 +367,7 @@ class ForestKVStore : public KVStore
 private:
     bool intransaction;
     const std::string dbname;
+    std::string dbFileName;
     uint64_t dbFileRevNum;
     fdb_file_handle* dbFileHandle;
     std::unordered_map<uint16_t, fdb_kvs_handle *> writeHandleMap;
@@ -374,7 +375,7 @@ private:
     std::vector<Couchbase::RelaxedAtomic<size_t>> cachedDeleteCount;
     Couchbase::RelaxedAtomic<uint64_t> cachedFileSize;
     Couchbase::RelaxedAtomic<uint64_t> cachedSpaceUsed;
-    fdb_kvs_handle* vbStateHandle;
+    //fdb_kvs_handle* vbStateHandle;
     fdb_config fileConfig;
     fdb_kvs_config kvsConfig;
     std::vector<ForestRequest *> pendingReqsQ;
