@@ -341,6 +341,11 @@ public:
      */
     void del(const Item &itm, Callback<int> &cb) override;
 
+    /**
+     * Delete a given vbucket database instance from the underlying storage system
+     *
+     * @param vbucket vbucket id
+     */
     bool delVBucket(uint16_t vbucket) override;
 
     /**

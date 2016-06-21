@@ -40,6 +40,25 @@ typedef struct ForestMetaData {
     uint8_t  confresmode;
 } ForestMetaData;
 
+/**
+ * Forest KV store handle
+ */
+typedef struct ForestKvsHandle {
+    ForestKvsHandle(fdb_file_handle* fHandle,
+                    fdb_kvs_handle* kHandle,
+                    bool avail,
+                    bool isExist) {
+        fileHandle = fHandle;
+        kvsHandle  = kHandle;
+        available.store(avail);
+        existing = isExist;
+    }
+    fdb_file_handle *fileHandle;
+    fdb_kvs_handle *kvsHandle;
+    std::atomic<bool> available;
+    bool existing;
+} ForestKvsHandle;
+
 #define forestMetaOffset(field) offsetof(ForestMetaData, field)
 
 enum class handleType {
@@ -199,6 +218,12 @@ class ForestKVStore : public KVStore
      */
     void del(const Item& itm, Callback<int>& cb) override;
 
+    /**
+     * Delete a given vbucket database instance from the
+     * underlying storage system
+     *
+     * @param vbucket vbucket id
+     */
     bool delVBucket(uint16_t vbucket) override;
 
     /**
@@ -236,7 +261,8 @@ class ForestKVStore : public KVStore
      * return database file id
      */
     uint16_t getDBFileId(const protocol_binary_request_compact_db& req) override {
-        return ntohs(req.message.body.db_file_id);
+        //return ntohs(req.message.body.db_file_id);
+        return ntohs(req.message.header.request.vbucket);
     }
 
     /**
@@ -363,20 +389,28 @@ private:
     const std::string dbname;
     std::atomic<uint64_t> dbFileRevNum;
     fdb_file_handle* dbFileHandle;
-    std::unordered_map<uint16_t, fdb_kvs_handle *> writeHandleMap;
-    std::unordered_map<uint16_t, fdb_kvs_handle *> readHandleMap;
+    std::string dbFileNameStr;
+    std::atomic<bool> isCompactRunning;
+    fdb_file_handle* readDBFileHandle;
+    fdb_file_handle* writeDBFileHandle;
+    std::mutex handleLock;
+    std::unordered_map<uint16_t, ForestKvsHandle *> writeHandleMap;
+    std::unordered_map<uint16_t, ForestKvsHandle *> readHandleMap;
     std::vector<Couchbase::RelaxedAtomic<size_t>> cachedDeleteCount;
     Couchbase::RelaxedAtomic<uint64_t> cachedFileSize;
     Couchbase::RelaxedAtomic<uint64_t> cachedSpaceUsed;
-    fdb_kvs_handle* vbStateHandle;
+    fdb_kvs_handle* readVbStateHandle;
+    fdb_kvs_handle* writeVbStateHandle;
     fdb_config fileConfig;
     fdb_kvs_config kvsConfig;
     std::vector<ForestRequest *> pendingReqsQ;
     static std::mutex initLock;
     static int numGlobalFiles;
     std::atomic<size_t> scanCounter; //atomic counter for generating scan id
-    std::map<size_t, fdb_kvs_handle*> scans; //map holding active scans
+    std::map<size_t, ForestKvsHandle*> scans; //map holding active scans
     std::mutex scanLock; //lock guarding the scan map
+    std::mutex backfillLock; /* guard for the backfills map */
+    std::mutex writerLock;
 
 private:
     void close();
@@ -385,7 +419,11 @@ private:
     void initForestDb();
     void shutdownForestDb();
     ENGINE_ERROR_CODE readVBState(uint16_t vbId);
-    fdb_kvs_handle* getKvsHandle(uint16_t vbId, handleType htype);
+    ForestKvsHandle* getKvsHandle(uint16_t vbId, handleType htype);
+    ForestKvsHandle* getNewKvsHandle(uint16_t vbId);
+    void releaseNewKvsHandle(ForestKvsHandle* fkvsHandle);
+    void releaseKvsHandle(ForestKvsHandle *fkvsHandle);
+    void removeKvsHandle(uint16_t vbId, handleType htype);
     bool save2forestdb();
     void updateFileInfo();
     GetValue docToItem(fdb_kvs_handle* kvsHandle, fdb_doc* rdoc, uint16_t vbId,

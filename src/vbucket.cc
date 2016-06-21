@@ -706,8 +706,18 @@ void VBucket::addStats(bool details, ADD_STAT add_stat, const void *c,
 
         DBFileInfo fileInfo = shard->getRWUnderlying()->getDbFileInfo(getId());
 
-        addStat("db_data_size", fileInfo.spaceUsed, add_stat, c);
-        addStat("db_file_size", fileInfo.fileSize, add_stat, c);
+        if (id == shard->getId()) {
+            addStat("db_data_size", fileInfo.spaceUsed, add_stat, c);
+            addStat("db_file_size", fileInfo.fileSize, add_stat, c);
+
+            LOG(EXTENSION_LOG_WARNING,
+                "DEBUG: ForestKVStore: vbid: %d, data size: %llu,"
+                "file size: %llu\n", id, fileInfo.spaceUsed, fileInfo.fileSize);
+
+        } else {
+            addStat("db_data_size", 1048576, add_stat, c);
+            addStat("db_file_size", 1048576, add_stat, c);
+        }
         addStat("high_seqno", getHighSeqno(), add_stat, c);
         addStat("uuid", failovers->getLatestUUID(), add_stat, c);
         addStat("purge_seqno", getPurgeSeqno(), add_stat, c);

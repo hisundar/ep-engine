@@ -95,6 +95,8 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config) :
         }
     }
 
+    dbFileNameStr = dbFile.str();
+
     dbFile << "." << dbFileRevNum;
 
     fileConfig = fdb_get_default_config();
@@ -118,15 +120,24 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config) :
 
     initForestDb();
 
-    status = fdb_open(&dbFileHandle, dbFile.str().c_str(), &fileConfig);
+    status = fdb_open(&readDBFileHandle, dbFile.str().c_str(), &fileConfig);
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING,
-            "ForestKVStore::ForestKVStore: Opening the database file instance "
+            "ForestKVStore::ForestKVStore: Opening the read database file instance "
             "failed with error: %s\n", fdb_error_msg(status));
         abort();
     }
 
-    fdb_kvs_handle* kvsHandle = NULL;
+    status = fdb_open(&writeDBFileHandle, dbFile.str().c_str(), &fileConfig);
+    if (status != FDB_RESULT_SUCCESS) {
+        LOG(EXTENSION_LOG_WARNING,
+            "ForestKVStore::ForestKVStore: Opening the write database file instance "
+            "failed with error: %s\n", fdb_error_msg(status));
+        abort();
+    }
+
+    //fdb_kvs_handle* kvsHandle = NULL;
+    ForestKvsHandle* kvsHandle = NULL;
     /* Initialize the reader and writer handle map for all the vbuckets in
      * the shard
      */
@@ -136,15 +147,26 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config) :
     }
 
     // Initialize the handle for the vbucket state information
-    status = fdb_kvs_open_default(dbFileHandle, &vbStateHandle, &kvsConfig);
+    status = fdb_kvs_open_default(readDBFileHandle,
+                                  &readVbStateHandle, &kvsConfig);
 
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING,
-            "ForestKVStore::ForestKVStore: Opening the vbucket state KV store "
-            "instance failed with error: %s\n", fdb_error_msg(status));
+            "ForestKVStore::ForestKVStore: Opening the read vbucket state "
+            "KV store instance failed with error: %s\n", fdb_error_msg(status));
         abort();
     }
 
+    status = fdb_kvs_open_default(writeDBFileHandle,
+                                  &writeVbStateHandle, &kvsConfig);
+
+    if (status != FDB_RESULT_SUCCESS) {
+        LOG(EXTENSION_LOG_WARNING,
+            "ForestKVStore::ForestKVStore: Opening the write vbucket state "
+            "KV store instance failed with error: %s\n", fdb_error_msg(status));
+        abort();
+    }
+    
     cachedVBStates.reserve(maxVbuckets);
     cachedValidVBCount = 0;
     for (uint16_t i = 0; i < maxVbuckets; ++i) {
@@ -159,6 +181,8 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config) :
             shardId += maxShards; // jump to next vbucket in shard
         }
     }
+
+    isCompactRunning = false;
 
     cachedDocCount.assign(maxVbuckets, Couchbase::RelaxedAtomic<size_t>(-1));
     cachedDeleteCount.assign(maxVbuckets, Couchbase::RelaxedAtomic<size_t>(-1));
@@ -197,25 +221,32 @@ ForestKVStore::~ForestKVStore() {
    }
 
    /* Close all the KV store instances */
-   std::unordered_map<uint16_t, fdb_kvs_handle *>::iterator handleItr;
+   std::unordered_map<uint16_t, ForestKvsHandle *>::iterator handleItr;
    for (handleItr = writeHandleMap.begin(); handleItr != writeHandleMap.end();
         handleItr++) {
-       fdb_kvs_handle* kvsHandle = handleItr->second;
-       fdb_kvs_close(kvsHandle);
+       ForestKvsHandle* fkvsHandle = handleItr->second;
+
+       if (fkvsHandle) {
+           fdb_kvs_close(fkvsHandle->kvsHandle);
+       }
    }
 
    writeHandleMap.clear();
 
    for (handleItr = readHandleMap.begin(); handleItr != readHandleMap.end();
         handleItr++) {
-       fdb_kvs_handle* kvsHandle = handleItr->second;
-       fdb_kvs_close(kvsHandle);
+       ForestKvsHandle* fkvsHandle = handleItr->second;
+
+       if (fkvsHandle) {
+           fdb_kvs_close(fkvsHandle->kvsHandle);
+       }
    }
 
    readHandleMap.clear();
 
    /* Close the database file instance */
-   fdb_close(dbFileHandle);
+   fdb_close(readDBFileHandle);
+   fdb_close(writeDBFileHandle);
 
    shutdownForestDb();
 }
@@ -233,39 +264,44 @@ void ForestKVStore::reset(uint16_t vbucketId) {
     cachedDocCount[vbucketId] = 0;
     cachedDeleteCount[vbucketId] = 0;
 
-    fdb_kvs_handle* kvsHandle = getKvsHandle(vbucketId, handleType::READER);
-    fdb_status status;
+    //fdb_kvs_handle* kvsHandle = getKvsHandle(vbucketId, handleType::READER);
+    //fdb_status status;
 
-    if (kvsHandle != nullptr) {
-        status = fdb_kvs_close(kvsHandle);
-        if (status != FDB_RESULT_SUCCESS) {
-            LOG(EXTENSION_LOG_WARNING,
-                "ForestKVStore::reset:fdb_kvs_close API call failed for "
-                "vbucket %" PRIu16" with error: %s", vbucketId,
-                fdb_error_msg(status));
-        }
-    }
+    //if (kvsHandle != nullptr) {
+    //    status = fdb_kvs_close(kvsHandle);
+    //    if (status != FDB_RESULT_SUCCESS) {
+    //        LOG(EXTENSION_LOG_WARNING,
+    //            "ForestKVStore::reset:fdb_kvs_close API call failed for "
+    //            "vbucket %" PRIu16" with error: %s", vbucketId,
+    //            fdb_error_msg(status));
+    //    }
+    //}
 
-    readHandleMap[vbucketId] = NULL;
+    //readHandleMap[vbucketId] = NULL;
 
-    kvsHandle = getKvsHandle(vbucketId, handleType::WRITER);
+    //kvsHandle = getKvsHandle(vbucketId, handleType::WRITER);
 
-    if (kvsHandle != nullptr) {
-        status = fdb_kvs_close(kvsHandle);
-        if (status != FDB_RESULT_SUCCESS) {
-            LOG(EXTENSION_LOG_WARNING,
-                "ForestKVStore::reset:fdb_kvs_close API call failed for "
-                "vbucket %" PRIu16" with error: %s", vbucketId,
-                fdb_error_msg(status));
-        }
-    }
+    //if (kvsHandle != nullptr) {
+    //    status = fdb_kvs_close(kvsHandle);
+    //    if (status != FDB_RESULT_SUCCESS) {
+    //        LOG(EXTENSION_LOG_WARNING,
+    //            "ForestKVStore::reset:fdb_kvs_close API call failed for "
+    //            "vbucket %" PRIu16" with error: %s", vbucketId,
+    //            fdb_error_msg(status));
+    //    }
+    //}
 
-    writeHandleMap[vbucketId] = NULL;
+    //writeHandleMap[vbucketId] = NULL;
+
+    removeKvsHandle(vbucketId, handleType::READER);
+    removeKvsHandle(vbucketId, handleType::WRITER);
 
     char kvsName[20];
     sprintf(kvsName,"partition%" PRIu16, vbucketId);
 
-    status = fdb_kvs_remove(dbFileHandle, kvsName);
+    LockHolder lh(writerLock);
+
+    fdb_status status = fdb_kvs_remove(writeDBFileHandle, kvsName);
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING,
             "ForestKVStore::reset: ForestDB KV Store remove failed for "
@@ -286,7 +322,7 @@ void ForestKVStore::reset(uint16_t vbucketId) {
         statDoc.metalen = 0;
         statDoc.body = const_cast<char *>(stateStr.c_str());
         statDoc.bodylen = stateStr.length();
-        fdb_status status = fdb_set(vbStateHandle, &statDoc);
+        fdb_status status = fdb_set(writeVbStateHandle, &statDoc);
 
         if (status != FDB_RESULT_SUCCESS) {
             LOG(EXTENSION_LOG_WARNING, "ForestKVStore::reset:Failed to save "
@@ -321,9 +357,10 @@ ENGINE_ERROR_CODE ForestKVStore::readVBState(uint16_t vbId) {
     int64_t driftCounter = INITIAL_DRIFT;
 
     fdb_kvs_info kvsInfo;
-    fdb_kvs_handle* kvsHandle = getKvsHandle(vbId, handleType::READER);
-    if (kvsHandle != nullptr) {
-        status = fdb_get_kvs_info(kvsHandle, &kvsInfo);
+    //ForestKvsHandle* fkvsHandle = getKvsHandle(vbId, handleType::READER);
+    ForestKvsHandle* fkvsHandle = getNewKvsHandle(vbId);
+    if (fkvsHandle != nullptr) {
+        status = fdb_get_kvs_info(fkvsHandle->kvsHandle, &kvsInfo);
         //TODO: Update the purge sequence number
         if (status == FDB_RESULT_SUCCESS) {
             highSeqno = static_cast<int64_t>(kvsInfo.last_seqnum);
@@ -342,7 +379,7 @@ ENGINE_ERROR_CODE ForestKVStore::readVBState(uint16_t vbId) {
     fdb_doc* statDoc;
     sprintf(keybuf, "partition%d", vbId);
     fdb_doc_create(&statDoc, (void *)keybuf, strlen(keybuf), NULL, 0, NULL, 0);
-    status = fdb_get(vbStateHandle, statDoc);
+    status = fdb_get(readVbStateHandle, statDoc);
 
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_DEBUG,
@@ -431,12 +468,14 @@ ENGINE_ERROR_CODE ForestKVStore::readVBState(uint16_t vbId) {
                                              maxCas, driftCounter,
                                              failovers);
     fdb_doc_free(statDoc);
+   
+    releaseNewKvsHandle(fkvsHandle);
     return forestErr2EngineErr(status);
 }
 
 void ForestKVStore::updateFileInfo(void) {
     fdb_file_info finfo;
-    fdb_status status = fdb_get_file_info(dbFileHandle, &finfo);
+    fdb_status status = fdb_get_file_info(writeDBFileHandle, &finfo);
     if (status == FDB_RESULT_SUCCESS) {
         cachedFileSize = finfo.file_size;
         cachedSpaceUsed = finfo.space_used;
@@ -448,38 +487,92 @@ void ForestKVStore::updateFileInfo(void) {
     }
 }
 
+void ForestKVStore::removeKvsHandle(uint16_t vbucket, handleType htype) {
+    char kvsName[20];
+    sprintf(kvsName, "partition%d", vbucket);
+    ForestKvsHandle* fkvsHandle = NULL;
+    std::unordered_map<uint16_t, ForestKvsHandle*>::iterator found;
+    //LockHolder lh(handleLock);
+    
+    switch (htype) {
+        case handleType::WRITER:
+            found = writeHandleMap.find(vbucket);
+            break;
+        case handleType::READER:
+            found = readHandleMap.find(vbucket);
+    }
+
+    if (found->second) {
+        fkvsHandle = found->second;
+        //if (fkvsHandle->available) {
+            fdb_kvs_close(fkvsHandle->kvsHandle);
+            free(fkvsHandle);
+            if (htype == handleType::READER) {
+                readHandleMap[vbucket] = NULL;
+            } else {
+                writeHandleMap[vbucket] = NULL;
+            }
+        //}
+    }
+}
+
+void ForestKVStore::releaseKvsHandle(ForestKvsHandle* fkvsHandle) {
+    
+    if (!fkvsHandle) {
+        return;
+    }
+
+    //if (fkvsHandle->existing) {
+    //    bool inverse = false;
+    //    if (!fkvsHandle->available.compare_exchange_strong(inverse, true)) {
+    //        LOG(EXTENSION_LOG_WARNING,
+    //            "ForestKVStore::releaseKvsHandle: unable to flip available flag");
+    //    }
+    //}
+    //} else {
+    //    fdb_kvs_close(fkvsHandle->kvsHandle);
+    //    fdb_close(fkvsHandle->fileHandle);
+    //    free(fkvsHandle);
+    //}
+}
+
 bool ForestKVStore::delVBucket(uint16_t vbucket) {
-    fdb_kvs_handle* kvsHandle = getKvsHandle(vbucket, handleType::READER);
-    fdb_status status;
 
-    if (kvsHandle != nullptr) {
-        status = fdb_kvs_close(kvsHandle);
-        if (status != FDB_RESULT_SUCCESS) {
-            LOG(EXTENSION_LOG_WARNING,
-                "ForestKVStore::delVBucket: fdb_kvs_close API call failed for "
-                "vbucket %" PRIu16 "with error: %s", vbucket, fdb_error_msg(status));
-        }
-    }
+    //ForestKvsHandle* kvsHandle = getKvsHandle(vbucket, handleType::READER);
+    //fdb_status status;
 
-    readHandleMap[vbucket] = NULL;
+    //if (kvsHandle != nullptr) {
+    //    status = fdb_kvs_close(kvsHandle);
+    //    if (status != FDB_RESULT_SUCCESS) {
+    //        LOG(EXTENSION_LOG_WARNING,
+    //            "ForestKVStore::delVBucket: fdb_kvs_close API call failed for "
+    //            "vbucket %d with error: %s\n", vbucket, fdb_error_msg(status));
+    //    }
+    //}
 
-    kvsHandle = getKvsHandle(vbucket, handleType::WRITER);
+    //readHandleMap[vbucket] = NULL;
 
-    if (kvsHandle != nullptr) {
-        status = fdb_kvs_close(kvsHandle);
-        if (status != FDB_RESULT_SUCCESS) {
-            LOG(EXTENSION_LOG_WARNING,
-                "ForestKVStore::delVBucket: fdb_kvs_close API call failed for "
-                "vbucket %" PRIu16 "with error: %s", vbucket, fdb_error_msg(status));
-        }
-    }
+    //rhlh.unlock();
 
-    writeHandleMap[vbucket] = NULL;
+    //kvsHandle = getKvsHandle(vbucket, handleType::WRITER);
+
+    //if (kvsHandle != nullptr) {
+    //    status = fdb_kvs_close(kvsHandle);
+    //    if (status != FDB_RESULT_SUCCESS) {
+    //        LOG(EXTENSION_LOG_WARNING,
+    //            "ForestKVStore::delVBucket: fdb_kvs_close API call failed for "
+    //            "vbucket %d with error: %s\n", vbucket, fdb_error_msg(status));
+    //    }
+    //}
+
+    removeKvsHandle(vbucket, handleType::READER);
+    removeKvsHandle(vbucket, handleType::WRITER);
 
     char kvsName[20];
     sprintf(kvsName,"partition%d", vbucket);
-
-    status = fdb_kvs_remove(dbFileHandle, kvsName);
+ 
+    LockHolder lh(writerLock);
+    fdb_status status = fdb_kvs_remove(writeDBFileHandle, kvsName);
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING,
             "ForestKVStore::delVBucket: KV Store remove failed for vbucket "
@@ -494,7 +587,12 @@ bool ForestKVStore::delVBucket(uint16_t vbucket) {
                 "ForestKVStore::delVBucket: rescheduling vbucket deletion for "
                 "vbucket %" PRIu16, vbucket);
         }
+    }
 
+    if (status == FDB_RESULT_HANDLE_BUSY ||
+        status == FDB_RESULT_FAIL_BY_COMPACTION) {
+        LOG(EXTENSION_LOG_WARNING,
+            "ForestKVStore::delVBucket: rescheduling delete vbucket");
         return false;
     }
 
@@ -519,7 +617,7 @@ bool ForestKVStore::delVBucket(uint16_t vbucket) {
         statDoc.metalen = 0;
         statDoc.body = const_cast<char *>(stateStr.c_str());
         statDoc.bodylen = stateStr.length();
-        fdb_status status = fdb_set(vbStateHandle, &statDoc);
+        fdb_status status = fdb_set(writeVbStateHandle, &statDoc);
 
         if (status != FDB_RESULT_SUCCESS) {
             LOG(EXTENSION_LOG_WARNING, "ForestKVStore::delVBucket: Failed to "
@@ -554,8 +652,9 @@ ENGINE_ERROR_CODE ForestKVStore::forestErr2EngineErr(fdb_status errCode) {
 void ForestKVStore::getWithHeader(void* handle, const std::string& key,
                                   uint16_t vb, Callback<GetValue>& cb,
                                   bool fetchDelete) {
-    fdb_kvs_handle* kvsHandle = static_cast<fdb_kvs_handle *>(handle);
-    if (!handle) {
+    ForestKvsHandle* fkvsHandle = static_cast<ForestKvsHandle *>(handle);
+    fdb_kvs_handle* kvsHandle = fkvsHandle->kvsHandle;
+    if (!fkvsHandle) {
         throw std::invalid_argument("ForestKVStore::getWithHeader: "
                                     "KVS Handle is NULL for vbucket id:" +
                                     std::to_string(vb));
@@ -793,6 +892,8 @@ bool ForestKVStore::save2forestdb() {
     uint16_t numShards = configuration.getMaxShards();
     uint16_t shardId = configuration.getShardId();
 
+    LockHolder lh(writerLock);
+
     for (uint16_t vbid = shardId; vbid < maxVbuckets; vbid += numShards) {
         vbucket_state* state = cachedVBStates[vbid];
         if (state != nullptr) {
@@ -812,7 +913,7 @@ bool ForestKVStore::save2forestdb() {
                 statDoc.metalen = 0;
                 statDoc.body = const_cast<char *>(stateStr.c_str());
                 statDoc.bodylen = stateStr.length();
-                fdb_status status = fdb_set(vbStateHandle, &statDoc);
+                fdb_status status = fdb_set(writeVbStateHandle, &statDoc);
 
                 if (status != FDB_RESULT_SUCCESS) {
                     throw std::runtime_error("ForestKVStore::save2forestdb: "
@@ -824,7 +925,7 @@ bool ForestKVStore::save2forestdb() {
         }
     }
 
-    fdb_status status = fdb_commit(dbFileHandle, FDB_COMMIT_NORMAL);
+    fdb_status status = fdb_commit(writeDBFileHandle, FDB_COMMIT_NORMAL);
     if (status != FDB_RESULT_SUCCESS) {
         throw std::runtime_error("ForestKVStore::save2forestdb: "
             "fdb_commit failed for shard id: " + std::to_string(shardId) +
@@ -832,9 +933,9 @@ bool ForestKVStore::save2forestdb() {
     }
 
     for (uint16_t vbId = shardId; vbId < maxVbuckets; vbId += numShards) {
-        fdb_kvs_handle* kvsHandle = getKvsHandle(vbId, handleType::READER);
+        ForestKvsHandle* fkvsHandle = getKvsHandle(vbId, handleType::WRITER);
         fdb_kvs_info kvsInfo;
-        fdb_status status = fdb_get_kvs_info(kvsHandle, &kvsInfo);
+        fdb_status status = fdb_get_kvs_info(fkvsHandle->kvsHandle, &kvsInfo);
 
         if (status == FDB_RESULT_SUCCESS) {
             cachedDeleteCount[vbId] = kvsInfo.deleted_count;
@@ -849,7 +950,9 @@ bool ForestKVStore::save2forestdb() {
                 std::to_string(vbId) + " with error: " +
                 std::string(fdb_error_msg(status)));
         }
-    }
+
+        //releaseKvsHandle(fkvsHandle);
+    } 
 
     commitCallback(pendingReqsQ);
 
@@ -882,12 +985,46 @@ StorageProperties ForestKVStore::getStorageProperties(void) {
     return rv;
 }
 
-fdb_kvs_handle* ForestKVStore::getKvsHandle(uint16_t vbucketId, handleType htype) {
+ForestKvsHandle* ForestKVStore::getNewKvsHandle(uint16_t vbucketId) {
+    std::stringstream dbFile;
+    dbFile << dbFileNameStr << "." << dbFileRevNum;
+    
+    fdb_file_handle* newDBFileHandle = NULL;
+    fdb_kvs_handle* newKvsHandle = NULL;
+    ForestKvsHandle* fkvsHandle = NULL;
+
+    fdb_status status = fdb_open(&newDBFileHandle, dbFile.str().c_str(), &fileConfig);
+    
     char kvsName[20];
     sprintf(kvsName, "partition%d", vbucketId);
-    fdb_kvs_handle* kvsHandle = NULL;
+    status = fdb_kvs_open(newDBFileHandle, &newKvsHandle, kvsName,
+                          &kvsConfig);
+    fkvsHandle = new ForestKvsHandle(newDBFileHandle, newKvsHandle, false, false);
+
+    return fkvsHandle;
+}
+
+void ForestKVStore::releaseNewKvsHandle(ForestKvsHandle* fkvsHandle) {
+    if (!fkvsHandle) {
+        return;
+    }
+
+    fdb_kvs_close(fkvsHandle->kvsHandle);
+    fdb_close(fkvsHandle->fileHandle);
+
+    free(fkvsHandle);
+}
+
+ForestKvsHandle* ForestKVStore::getKvsHandle(uint16_t vbucketId, handleType htype) {
+    char kvsName[20];
+    sprintf(kvsName, "partition%d", vbucketId);
+    ForestKvsHandle* fkvsHandle = NULL;
+    fdb_kvs_handle *kvsHandle = NULL;
     fdb_status status;
-    std::unordered_map<uint16_t, fdb_kvs_handle*>::iterator found;
+    std::unordered_map<uint16_t, ForestKvsHandle*>::iterator found;
+
+    //Acquire the handle lock
+    //LockHolder lh(handleLock);
 
     switch (htype) {
         case handleType::WRITER:
@@ -909,7 +1046,11 @@ fdb_kvs_handle* ForestKVStore::getKvsHandle(uint16_t vbucketId, handleType htype
     }
 
     if (!(found->second)) {
-        status = fdb_kvs_open(dbFileHandle, &kvsHandle, kvsName, &kvsConfig);
+        if (htype == handleType::READER) {
+            status = fdb_kvs_open(readDBFileHandle, &kvsHandle, kvsName, &kvsConfig);
+        } else {
+            status = fdb_kvs_open(writeDBFileHandle, &kvsHandle, kvsName, &kvsConfig);
+        }
         if (status != FDB_RESULT_SUCCESS) {
             LOG(EXTENSION_LOG_WARNING,
                 "ForestKVStore::getKvsHandle: Opening the KV store instance "
@@ -917,12 +1058,41 @@ fdb_kvs_handle* ForestKVStore::getKvsHandle(uint16_t vbucketId, handleType htype
                 fdb_error_msg(status));
             return NULL;
         }
-        found->second = kvsHandle;
+
+        if (htype == handleType::READER) {
+            fkvsHandle = new ForestKvsHandle(readDBFileHandle, kvsHandle,
+                                             false, true);
+        } else if (htype == handleType::WRITER) {
+            fkvsHandle = new ForestKvsHandle(writeDBFileHandle, kvsHandle,
+                                             false, true);
+        }
+
+        found->second = fkvsHandle;
     } else {
-        kvsHandle = found->second;
+        fkvsHandle = found->second;
+        //bool inverse = false;
+        //if (!fkvsHandle->available.compare_exchange_strong(inverse, true)) {
+        //    LOG(EXTENSION_LOG_WARNING,
+        //        "ForestKVStore::getKvsHandle: Handle is already in use by"
+        //        " some other thread. Creating a new one");
+
+         //   std::stringstream dbFile;
+         //   dbFile << dbFileNameStr << "." << dbFileRevNum;
+
+         //   fdb_file_handle* newDBFileHandle = NULL;
+         //   fdb_kvs_handle* newKvsHandle = NULL;
+
+         //   status = fdb_open(&newDBFileHandle, dbFile.str().c_str(), &fileConfig);
+
+         //   char kvsName[20];
+         //   sprintf(kvsName, "partition%d", vbucketId);        
+         //   status = fdb_kvs_open(newDBFileHandle, &newKvsHandle, kvsName, &kvsConfig);
+         //   fkvsHandle = new ForestKvsHandle(newDBFileHandle, newKvsHandle,
+         //                                    false, false);
+        //}
     }
 
-    return kvsHandle;
+    return fkvsHandle;
 }
 
 static int8_t getMutationStatus(fdb_status errCode) {
@@ -987,7 +1157,7 @@ void ForestKVStore::set(const Item& itm, Callback<mutation_result>& cb) {
     requestcb.setCb = &cb;
     ForestRequest* req = new ForestRequest(itm, requestcb, false);
     fdb_doc setDoc;
-    fdb_kvs_handle* kvsHandle = NULL;
+    ForestKvsHandle* fkvsHandle = NULL;
     fdb_status status;
     uint8_t meta[FORESTDB_METADATA_SIZE];
 
@@ -1003,9 +1173,9 @@ void ForestKVStore::set(const Item& itm, Callback<mutation_result>& cb) {
     setDoc.deleted = false;
 
     fdb_doc_set_seqnum(&setDoc, itm.getBySeqno());
-    kvsHandle = getKvsHandle(req->getVBucketId(), handleType::WRITER);
-    if (kvsHandle) {
-        status = fdb_set(kvsHandle, &setDoc);
+    fkvsHandle = getKvsHandle(req->getVBucketId(), handleType::WRITER);
+    if (fkvsHandle) {
+        status = fdb_set(fkvsHandle->kvsHandle, &setDoc);
         if (status != FDB_RESULT_SUCCESS) {
             LOG(EXTENSION_LOG_WARNING, "ForestKVStore::set: fdb_set failed "
                 "for key: %s and vbucketId: %" PRIu16 " with error: %s",
@@ -1021,6 +1191,8 @@ void ForestKVStore::set(const Item& itm, Callback<mutation_result>& cb) {
         req->setStatus(MUTATION_FAILED);
     }
 
+    //releaseKvsHandle(fkvsHandle);
+
     pendingReqsQ.push_back(req);
 }
 
@@ -1034,15 +1206,16 @@ ENGINE_ERROR_CODE
 ForestKVStore::getAllKeys(uint16_t vbid, std::string& start_key, uint32_t count,
                          std::shared_ptr<Callback<uint16_t&, char*&> > cb) {
 
-    fdb_kvs_handle* kvsHandle = getKvsHandle(vbid, handleType::READER);
-    if (kvsHandle == nullptr) {
+    //ForestKvsHandle* fkvsHandle = getKvsHandle(vbid, handleType::READER);
+    ForestKvsHandle* fkvsHandle = getNewKvsHandle(vbid);
+    if (fkvsHandle == nullptr) {
         throw std::invalid_argument("ForestKVStore::getAllKeys: Unable to "
                   "retrieve KV store handle for vbucket id:" +
                   std::to_string(vbid));
     }
 
     fdb_iterator* fdb_iter = NULL;
-    fdb_status status = fdb_iterator_init(kvsHandle, &fdb_iter,
+    fdb_status status = fdb_iterator_init(fkvsHandle->kvsHandle, &fdb_iter,
                                           start_key.c_str(), strlen(start_key.c_str()),
                                           NULL, 0, FDB_ITR_NO_DELETES);
     if (status != FDB_RESULT_SUCCESS) {
@@ -1084,6 +1257,8 @@ ForestKVStore::getAllKeys(uint16_t vbid, std::string& start_key, uint32_t count,
 
     fdb_doc_free(rdoc);
     fdb_iterator_close(fdb_iter);
+
+    releaseNewKvsHandle(fkvsHandle);
 
     return ENGINE_SUCCESS;
 }
@@ -1130,7 +1305,7 @@ void ForestKVStore::del(const Item& itm, Callback<int>& cb) {
     requestcb.delCb = &cb;
     ForestRequest* req = new ForestRequest(itm, requestcb, true);
     fdb_doc delDoc;
-    fdb_kvs_handle* kvsHandle = NULL;
+    ForestKvsHandle* fkvsHandle = NULL;
     fdb_status status;
     uint8_t meta[FORESTDB_METADATA_SIZE];
 
@@ -1144,9 +1319,9 @@ void ForestKVStore::del(const Item& itm, Callback<int>& cb) {
     delDoc.deleted = true;
 
     fdb_doc_set_seqnum(&delDoc, itm.getBySeqno());
-    kvsHandle = getKvsHandle(req->getVBucketId(), handleType::WRITER);
-    if (kvsHandle) {
-        status = fdb_del(kvsHandle, &delDoc);
+    fkvsHandle = getKvsHandle(req->getVBucketId(), handleType::WRITER);
+    if (fkvsHandle) {
+        status = fdb_del(fkvsHandle->kvsHandle, &delDoc);
         if (status != FDB_RESULT_SUCCESS) {
             LOG(EXTENSION_LOG_WARNING, "ForesKVStore::del: fdb_del failed "
                 "for key: %s and vbucketId: %" PRIu16 " with error: %s",
@@ -1159,6 +1334,8 @@ void ForestKVStore::del(const Item& itm, Callback<int>& cb) {
             req->getVBucketId());
         req->setStatus(MUTATION_FAILED);
     }
+
+    //releaseKvsHandle(fkvsHandle);
 
     pendingReqsQ.push_back(req);
 }
@@ -1173,8 +1350,8 @@ size_t ForestKVStore::getNumPersistedDeletes(uint16_t vbid) {
         return delCount;
     }
 
-    fdb_kvs_handle* kvsHandle = getKvsHandle(vbid, handleType::READER);
-    if (!kvsHandle) {
+    ForestKvsHandle* fkvsHandle = getNewKvsHandle(vbid);
+    if (!fkvsHandle) {
         std::string err("ForestKVStore::getNumPersistedDeletes: Failed to "
                         "get reader KV store handle for vbucket:" +
                         std::to_string(static_cast<int>(vbid)));
@@ -1182,7 +1359,7 @@ size_t ForestKVStore::getNumPersistedDeletes(uint16_t vbid) {
     }
 
     fdb_kvs_info kvsInfo;
-    fdb_status status = fdb_get_kvs_info(kvsHandle, &kvsInfo);
+    fdb_status status = fdb_get_kvs_info(fkvsHandle->kvsHandle, &kvsInfo);
     if (status != FDB_RESULT_SUCCESS) {
         std::string err("ForestKVStore::getNumPersistedDeletes:Failed to "
             "retrieve KV store info with error:" +
@@ -1190,6 +1367,8 @@ size_t ForestKVStore::getNumPersistedDeletes(uint16_t vbid) {
             std::to_string(static_cast<int>(vbid)));
         throw std::runtime_error(err);
     }
+
+    releaseNewKvsHandle(fkvsHandle);
 
     return kvsInfo.deleted_count;
 }
@@ -1199,16 +1378,36 @@ DBFileInfo ForestKVStore::getDbFileInfo(uint16_t vbId) {
     fdb_file_info fileInfo;
     fdb_status status;
 
-    status = fdb_get_file_info(dbFileHandle, &fileInfo);
-    if (status != FDB_RESULT_SUCCESS) {
-        std::string err("ForestKVStore::getDbFileInfo:Failed to retrieve "
-            "file info with error:" + std::string(fdb_error_msg(status)) +
-            " for vbucket id:" + std::to_string(static_cast<int>(vbId)));
-        throw std::runtime_error(err);
-    }
+    std::stringstream dbFile;
+    dbFile << dbFileNameStr << "." << dbFileRevNum;
+    fdb_file_handle* newDBFileHandle = NULL;
+    fdb_kvs_handle* newKvsHandle = NULL;
 
-    dbInfo.fileSize =  fileInfo.file_size/fileInfo.num_kv_stores;
-    dbInfo.spaceUsed = fileInfo.space_used/fileInfo.num_kv_stores;
+    //status = fdb_open(&newDBFileHandle, dbFile.str().c_str(), &fileConfig);
+   
+    //if (status != FDB_RESULT_SUCCESS) {
+    //    std::string err("ForestKVStore::getDbFileInfo:Failed to open "
+    //    "file with error:" + std::string(fdb_error_msg(status)) +
+    //    " for vbucket id:" + std::to_string(static_cast<int>(vbId)));
+    //    throw std::runtime_error(err);
+    //}
+
+    //status = fdb_get_file_info(newDBFileHandle, &fileInfo);
+
+    //if (status != FDB_RESULT_SUCCESS) {
+    //    std::string err("ForestKVStore::getDbFileInfo:Failed to retrieve "
+    //    "file info with error:" + std::string(fdb_error_msg(status)) +
+    //    " for vbucket id:" + std::to_string(static_cast<int>(vbId)));
+    //    throw std::runtime_error(err);
+    //}
+
+    //dbInfo.fileSize =  fileInfo.file_size/fileInfo.num_kv_stores;
+    //dbInfo.spaceUsed = fileInfo.space_used/fileInfo.num_kv_stores;
+
+    dbInfo.fileSize =  cachedFileSize.load();
+    dbInfo.spaceUsed = cachedSpaceUsed.load();
+
+    //fdb_close(newDBFileHandle);
 
     return dbInfo;
 }
@@ -1238,7 +1437,9 @@ bool ForestKVStore::snapshotVBucket(uint16_t vbucketId, vbucket_state& vbstate,
         statDoc.metalen = 0;
         statDoc.body = const_cast<char *>(stateStr.c_str());
         statDoc.bodylen = stateStr.length();
-        fdb_status status = fdb_set(vbStateHandle, &statDoc);
+
+        LockHolder lh(writerLock);
+        fdb_status status = fdb_set(writeVbStateHandle, &statDoc);
 
         if (status != FDB_RESULT_SUCCESS) {
             LOG(EXTENSION_LOG_WARNING, "ForestKVStore::snapshotVBucket: Failed to "
@@ -1248,7 +1449,7 @@ bool ForestKVStore::snapshotVBucket(uint16_t vbucketId, vbucket_state& vbstate,
         }
 
         if (options == VBStatePersist::VBSTATE_PERSIST_WITH_COMMIT) {
-            status = fdb_commit(dbFileHandle, FDB_COMMIT_NORMAL);
+            status = fdb_commit(writeDBFileHandle, FDB_COMMIT_NORMAL);
 
             if (status != FDB_RESULT_SUCCESS) {
                 LOG(EXTENSION_LOG_WARNING, "ForestKVStore::snapshotVBucket: Failed "
@@ -1257,9 +1458,9 @@ bool ForestKVStore::snapshotVBucket(uint16_t vbucketId, vbucket_state& vbstate,
                 return false;
             }
         }
-    }
 
-    updateFileInfo();
+        updateFileInfo();
+    }
 
     return true;
 }
@@ -1269,10 +1470,11 @@ ScanContext* ForestKVStore::initScanContext(std::shared_ptr<Callback<GetValue> >
                                            uint16_t vbid, uint64_t startSeqno,
                                            DocumentFilter options,
                                            ValueFilter valOptions) {
-    fdb_kvs_handle* kvsHandle = NULL;
+    ForestKvsHandle* fkvsHandle = NULL;
 
-    kvsHandle = getKvsHandle(vbid, handleType::READER);
-    if (!kvsHandle) {
+    //fkvsHandle = getNewKvsHandle(vbid, handleType::READER);
+    fkvsHandle = getNewKvsHandle(vbid);
+    if (!fkvsHandle) {
         std::string err("ForestKVStore::initScanContext: Failed to get reader "
                         "KV store handle for vbucket:" +
                         std::to_string(static_cast<int>(vbid)));
@@ -1280,7 +1482,7 @@ ScanContext* ForestKVStore::initScanContext(std::shared_ptr<Callback<GetValue> >
     }
 
     fdb_kvs_info kvsInfo;
-    fdb_status status = fdb_get_kvs_info(kvsHandle, &kvsInfo);
+    fdb_status status = fdb_get_kvs_info(fkvsHandle->kvsHandle, &kvsInfo);
     if (status != FDB_RESULT_SUCCESS) {
         std::string err("ForestKVStore::initScanContext: Failed to retrieve "
             "KV store info with error:" + std::string(fdb_error_msg(status)) +
@@ -1289,13 +1491,13 @@ ScanContext* ForestKVStore::initScanContext(std::shared_ptr<Callback<GetValue> >
     }
 
     size_t scanId = scanCounter++;
-    size_t count = getNumItems(kvsHandle,
+    size_t count = getNumItems(fkvsHandle->kvsHandle,
                                startSeqno,
                                std::numeric_limits<uint64_t>::max());
 
     {
         LockHolder lh(scanLock);
-        scans[scanId] = kvsHandle;
+        scans[scanId] = fkvsHandle;
     }
 
     return new ScanContext(cb, cl, vbid, scanId, startSeqno,
@@ -1312,7 +1514,7 @@ scan_error_t ForestKVStore::scan(ScanContext* ctx) {
         return scan_success;
     }
 
-    fdb_kvs_handle* kvsHandle;
+    ForestKvsHandle* fkvsHandle;
     {
         LockHolder lh(scanLock);
         auto itr = scans.find(ctx->scanId);
@@ -1320,8 +1522,10 @@ scan_error_t ForestKVStore::scan(ScanContext* ctx) {
             return scan_failed;
         }
 
-        kvsHandle = itr->second;
+        fkvsHandle = itr->second;
     }
+
+    fdb_kvs_handle* kvsHandle = fkvsHandle->kvsHandle;
 
     fdb_iterator_opt_t options;
 
@@ -1389,6 +1593,8 @@ void ForestKVStore::destroyScanContext(ScanContext* ctx) {
     LockHolder lh(scanLock);
     auto itr = scans.find(ctx->scanId);
     if (itr != scans.end()) {
+        ForestKvsHandle* fkvsHandle = itr->second;
+        releaseNewKvsHandle(fkvsHandle);
         scans.erase(itr);
     }
 
@@ -1436,8 +1642,9 @@ fdb_compact_decision ForestKVStore::compaction_cb(fdb_file_handle* fhandle,
         return FDB_CS_KEEP_DOC;
     }
 
-    fdb_kvs_handle* kvsHandle = store->getKvsHandle(vbid, handleType::READER);
-    if (!kvsHandle) {
+    //ForestKvsHandle* fkvsHandle = store->getNewKvsHandle(vbid, handleType::READER);
+    ForestKvsHandle* fkvsHandle = store->getNewKvsHandle(vbid);
+    if (!fkvsHandle) {
         LOG(EXTENSION_LOG_WARNING,
             "ForestKVStore::compaction_cb: Failed to retrieve reader handle for "
             "vbucket %" PRIu16, vbid);
@@ -1445,7 +1652,7 @@ fdb_compact_decision ForestKVStore::compaction_cb(fdb_file_handle* fhandle,
     }
 
     fdb_kvs_info kvsInfo;
-    fdb_status status = fdb_get_kvs_info(kvsHandle, &kvsInfo);
+    fdb_status status = fdb_get_kvs_info(fkvsHandle->kvsHandle, &kvsInfo);
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING,
             "ForestKVStore::compaction_cb: Failed to retrieve KV store information for "
@@ -1503,11 +1710,25 @@ fdb_compact_decision ForestKVStore::compaction_cb(fdb_file_handle* fhandle,
         comp_ctx->bloomFilterCallback->callback(vbid, key, deleted);
     }
 
+    store->releaseNewKvsHandle(fkvsHandle);
+
     return FDB_CS_KEEP_DOC;
 }
 
 bool ForestKVStore::compactDB(compaction_ctx* ctx) {
+    if (isCompactRunning) {
+        LOG(EXTENSION_LOG_WARNING,
+            "ForestKVStore::compactDB: Compaction is already running"
+            "for shard: %d", ctx->db_file_id);
+        return false;
+    }
+
+    isCompactRunning = true;
+
     uint16_t shardId = ctx->db_file_id;
+
+    LOG(EXTENSION_LOG_WARNING,
+        "DEBUG: ForestKVStore: Compacting shard file: %d", shardId);
 
     std::string dbFileBase = dbname + "/" + std::to_string(shardId) + ".fdb.";
 
@@ -1548,14 +1769,30 @@ bool ForestKVStore::compactDB(compaction_ctx* ctx) {
     /* Compaction is complete at this point. Switch to the new file */
     ++dbFileRevNum;
 
+    isCompactRunning = false;
+
+    fdb_file_handle* newDBFileHandle = NULL;
+    fdb_file_info fileInfo;
+
+    status = fdb_open(&newDBFileHandle, newDbFile.c_str(), &fileConfig);
+
+    status = fdb_get_file_info(newDBFileHandle, &fileInfo);
+
+    cachedFileSize = fileInfo.file_size;
+    cachedSpaceUsed = fileInfo.space_used;
+
+    fdb_close(newDBFileHandle);
+
     return true;
 }
 
 size_t ForestKVStore::getNumItems(uint16_t vbid, uint64_t min_seq,
                                   uint64_t max_seq) {
-    fdb_kvs_handle* kvsHandle = NULL;
-    kvsHandle = getKvsHandle(vbid, handleType::READER);
-    return getNumItems(kvsHandle, min_seq, max_seq);
+    ForestKvsHandle* fkvsHandle = NULL;
+    fkvsHandle = getKvsHandle(vbid, handleType::READER);
+    size_t numItems = getNumItems(fkvsHandle->kvsHandle, min_seq, max_seq);
+    //releaseKvsHandle(fkvsHandle);
+    return numItems;
 }
 
 size_t ForestKVStore::getNumItems(fdb_kvs_handle* kvsHandle,
@@ -1585,19 +1822,20 @@ size_t ForestKVStore::getNumItems(fdb_kvs_handle* kvsHandle,
 
 size_t ForestKVStore::getItemCount(uint16_t vbid) {
     if (cachedDocCount.at(vbid) == static_cast<size_t>(-1)) {
-        fdb_kvs_handle* kvsHandle = NULL;
+        ForestKvsHandle* fkvsHandle = NULL;
         fdb_status status;
         fdb_kvs_info kvsInfo;
 
-        kvsHandle = getKvsHandle(vbid, handleType::READER);
-        if (!kvsHandle) {
+        //fkvsHandle = getNewKvsHandle(vbid, handleType::READER);
+        fkvsHandle = getNewKvsHandle(vbid);
+        if (!fkvsHandle) {
             std::string err("ForestKVStore::getItemCount:Failed to get reader "
                 "KV store handle for vbucket:" +
                 std::to_string(static_cast<int>(vbid)));
             throw std::invalid_argument(err);
         }
 
-        status = fdb_get_kvs_info(kvsHandle, &kvsInfo);
+        status = fdb_get_kvs_info(fkvsHandle->kvsHandle, &kvsInfo);
         if (status != FDB_RESULT_SUCCESS) {
             std::string err("ForestKVStore::getItemCount::Failed to retrieve "
                 "KV store info with error:" + std::string(fdb_error_msg(status)) +
@@ -1606,6 +1844,8 @@ size_t ForestKVStore::getItemCount(uint16_t vbid) {
         }
 
         cachedDocCount[vbid] = kvsInfo.doc_count;
+ 
+        releaseNewKvsHandle(fkvsHandle);
     }
 
     return cachedDocCount.at(vbid);
@@ -1613,11 +1853,11 @@ size_t ForestKVStore::getItemCount(uint16_t vbid) {
 
 RollbackResult ForestKVStore::rollback(uint16_t vbid, uint64_t rollbackSeqno,
                                        std::shared_ptr<RollbackCB> cb) {
-    fdb_kvs_handle* kvsHandle = NULL;
+    ForestKvsHandle* fkvsHandle = NULL;
     fdb_kvs_info kvsInfo;
 
-    kvsHandle = getKvsHandle(vbid, handleType::WRITER);
-    if (!kvsHandle) {
+    fkvsHandle = getKvsHandle(vbid, handleType::WRITER);
+    if (!fkvsHandle) {
         LOG(EXTENSION_LOG_WARNING, "ForestKVStore::rollback: "
             "Failed to get reader KV store handle for vbucket: "
             "%" PRIu16 " and rollback sequence number: %" PRIu64, vbid,
@@ -1625,7 +1865,7 @@ RollbackResult ForestKVStore::rollback(uint16_t vbid, uint64_t rollbackSeqno,
         return RollbackResult(false, 0, 0, 0);
     }
 
-    fdb_status status = fdb_get_kvs_info(kvsHandle, &kvsInfo);
+    fdb_status status = fdb_get_kvs_info(fkvsHandle->kvsHandle, &kvsInfo);
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING, "ForestKVStore::rollback: "
             "Failed to retrieve KV store info with error: %s for "
@@ -1635,7 +1875,7 @@ RollbackResult ForestKVStore::rollback(uint16_t vbid, uint64_t rollbackSeqno,
     }
 
     // Get closest available sequence number to rollback to
-    uint64_t currentSeqno = fdb_get_available_rollback_seq(kvsHandle,
+    uint64_t currentSeqno = fdb_get_available_rollback_seq(fkvsHandle->kvsHandle,
                                                            rollbackSeqno);
     if (currentSeqno == 0) {
         LOG(EXTENSION_LOG_WARNING, "ForestKVStore::rollback: "
@@ -1649,7 +1889,7 @@ RollbackResult ForestKVStore::rollback(uint16_t vbid, uint64_t rollbackSeqno,
     // point of rollback. This snapshot is needed to identify the earlier
     // revision of the items that are being rolled back.
     fdb_kvs_handle* snaphandle = NULL;
-    status = fdb_snapshot_open(kvsHandle, &snaphandle, currentSeqno);
+    status = fdb_snapshot_open(fkvsHandle->kvsHandle, &snaphandle, currentSeqno);
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING, "ForestKVStore::rollback: "
             "Failed to retrieve persisted snapshot handle from the "
@@ -1677,7 +1917,7 @@ RollbackResult ForestKVStore::rollback(uint16_t vbid, uint64_t rollbackSeqno,
     }
 
     // Initiate disk rollback
-    status = fdb_rollback(&kvsHandle, currentSeqno);
+    status = fdb_rollback(&(fkvsHandle->kvsHandle), currentSeqno);
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING, "ForestKVStore::rollback: "
             "ForestDB rollback failed on vbucket: %" PRIu16 " and rollback "
@@ -1686,7 +1926,7 @@ RollbackResult ForestKVStore::rollback(uint16_t vbid, uint64_t rollbackSeqno,
         return RollbackResult(false, 0, 0, 0);
     }
 
-    status = fdb_get_kvs_info(kvsHandle, &kvsInfo);
+    status = fdb_get_kvs_info(fkvsHandle->kvsHandle, &kvsInfo);
     if (status != FDB_RESULT_SUCCESS) {
         LOG(EXTENSION_LOG_WARNING, "ForestKVStore::rollback: "
             "Failed to retrieve KV store info after rollback with error: %s "
@@ -1695,7 +1935,11 @@ RollbackResult ForestKVStore::rollback(uint16_t vbid, uint64_t rollbackSeqno,
         return RollbackResult(false, 0, 0 ,0);
     }
 
-    writeHandleMap[vbid] = kvsHandle;
+    //TODO: There should be a lock protecting the update of the handle
+    //in the handle map
+    writeHandleMap[vbid] = fkvsHandle;
+
+    //releaseKvsHandle(fkvsHandle);
 
     readVBState(vbid);
 
@@ -1703,6 +1947,7 @@ RollbackResult ForestKVStore::rollback(uint16_t vbid, uint64_t rollbackSeqno,
     cachedDeleteCount[vbid] = kvsInfo.deleted_count;
 
     vbucket_state *vb_state = cachedVBStates[vbid];
+
     return RollbackResult(true, vb_state->highSeqno,
                           vb_state->lastSnapStart, vb_state->lastSnapEnd);
 }
