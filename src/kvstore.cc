@@ -74,7 +74,7 @@ KVStore *KVStoreFactory::create(KVStoreConfig &config, bool read_only) {
         ret = new CouchKVStore(config, read_only);
 #ifdef EP_USE_FORESTDB
     } else if (backend.compare("forestdb") == 0) {
-        ret = new ForestKVStore(config);
+        ret = new ForestKVStore(config, read_only);
 #endif
     } else {
         LOG(EXTENSION_LOG_WARNING, "Unknown backend: [%s]", backend.c_str());
@@ -121,12 +121,93 @@ bool KVStore::updateCachedVBState(uint16_t vbid, const vbucket_state& newState) 
         vbState->maxCas = std::max(vbState->maxCas, newState.maxCas);
     } else {
         cachedVBStates[vbid] = new vbucket_state(newState);
-        if (cachedVBStates[vbid]->state != vbucket_state_dead) {
-            cachedValidVBCount++;
-        }
     }
 
     return state_change_detected;
+}
+
+static bool allDigit(std::string &input) {
+    size_t numchar = input.length();
+    for(size_t i = 0; i < numchar; ++i) {
+        if (!isdigit(input[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void KVStore::populateFileNameMap(std::string dbname,
+                                  std::vector<std::string> &filenames,
+                                  std::vector<uint16_t> &vbids,
+                                  std::string filename_suffix) {
+    std::vector<std::string>::iterator fileItr;
+
+    for (fileItr = filenames.begin(); fileItr != filenames.end(); ++fileItr) {
+        const std::string &filename = *fileItr;
+        size_t secondDot = filename.rfind(".");
+        std::string nameKey = filename.substr(0, secondDot);
+        size_t firstDot = nameKey.rfind(".");
+#ifdef _MSC_VER
+        size_t firstSlash = nameKey.rfind("\\");
+#else
+        size_t firstSlash = nameKey.rfind("/");
+#endif
+
+        std::string revNumStr = filename.substr(secondDot + 1);
+        char *ptr = NULL;
+        uint64_t revNum = strtoull(revNumStr.c_str(), &ptr, 10);
+
+        std::string vbIdStr = nameKey.substr(firstSlash + 1,
+                                            (firstDot - firstSlash) - 1);
+        if (allDigit(vbIdStr)) {
+            int vbId = atoi(vbIdStr.c_str());
+            vbids.push_back(static_cast<uint16_t>(vbId));
+            uint64_t old_rev_num = dbFileRevMap[vbId];
+            if (old_rev_num == revNum) {
+                continue;
+            } else if (old_rev_num < revNum) { // stale revision found
+                dbFileRevMap[vbId] = revNum;
+            } else { // stale file found (revision id has rolled over)
+                old_rev_num = revNum;
+            }
+            std::stringstream old_file;
+            old_file << dbname << "/" << vbId << "."
+                     << filename_suffix << "." << old_rev_num;
+            if (access(old_file.str().c_str(), F_OK) == 0) {
+                if (!isReadOnly()) {
+                    if (remove(old_file.str().c_str()) == 0) {
+                        logger.log(EXTENSION_LOG_INFO, "Removed stale file '%s'",
+                                   old_file.str().c_str());
+                    } else {
+                        logger.log(EXTENSION_LOG_WARNING,
+                                   "Warning: Failed to remove the stale file '%s': %s",
+                                   old_file.str().c_str(), cb_strerror().c_str());
+                    }
+                } else {
+                    logger.log(EXTENSION_LOG_WARNING,
+                               "A read-only instance of the underlying store "
+                               "was not allowed to delete a stale file: %s!",
+                               old_file.str().c_str());
+                }
+            }
+        } else {
+            // skip non-vbucket database file, master.couch etc
+            logger.log(EXTENSION_LOG_DEBUG,
+                       "Non-vbucket database file, %s, skip adding "
+                       "to CouchKVStore dbFileMap\n", filename.c_str());
+        }
+    }
+}
+
+void KVStore::updateDbFileMap(uint16_t vbucketId, uint64_t newFileRev) {
+    if (vbucketId >= numDbFiles) {
+        logger.log(EXTENSION_LOG_WARNING,
+                   "Cannot update db file map for an invalid vbucket, "
+                   "vbucket id = %d, rev = %" PRIu64, vbucketId, newFileRev);
+        return;
+    }
+
+    dbFileRevMap[vbucketId] = newFileRev;
 }
 
 bool KVStore::snapshotStats(const std::map<std::string,

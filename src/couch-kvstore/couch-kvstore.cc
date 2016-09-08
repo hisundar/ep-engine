@@ -124,16 +124,6 @@ static int getMutationStatus(couchstore_error_t errCode) {
     }
 }
 
-static bool allDigit(std::string &input) {
-    size_t numchar = input.length();
-    for(size_t i = 0; i < numchar; ++i) {
-        if (!isdigit(input[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static std::string couchkvstore_strerrno(Db *db, couchstore_error_t err) {
     return (err == COUCHSTORE_ERROR_OPEN_FILE ||
             err == COUCHSTORE_ERROR_READ ||
@@ -245,6 +235,14 @@ CouchRequest::CouchRequest(const Item &it, uint64_t rev,
     }
 }
 
+static std::string getDBFileName(const std::string &dbname,
+                                 uint16_t vbid,
+                                 uint64_t rev) {
+    std::stringstream ss;
+    ss << dbname << "/" << vbid << ".couch." << rev;
+    return ss.str();
+}
+
 CouchKVStore::CouchKVStore(KVStoreConfig &config, bool read_only)
     : CouchKVStore(config, *couchstore_get_default_file_ops(), read_only) {
 
@@ -254,9 +252,7 @@ CouchKVStore::CouchKVStore(KVStoreConfig &config, FileOpsInterface& ops,
                            bool read_only)
     : KVStore(config, read_only),
       dbname(config.getDBName()),
-      intransaction(false),
       scanCounter(0),
-      logger(config.getLogger()),
       base_ops(ops)
 {
     createDataDir(dbname);
@@ -283,10 +279,6 @@ CouchKVStore::CouchKVStore(KVStoreConfig &config, FileOpsInterface& ops,
 CouchKVStore::CouchKVStore(const CouchKVStore &copyFrom)
     : KVStore(copyFrom),
       dbname(copyFrom.dbname),
-      dbFileRevMap(copyFrom.dbFileRevMap),
-      numDbFiles(copyFrom.numDbFiles),
-      intransaction(false),
-      logger(copyFrom.logger),
       base_ops(copyFrom.base_ops)
 {
     createDataDir(dbname);
@@ -299,7 +291,7 @@ void CouchKVStore::initialize() {
     std::vector<uint16_t> vbids;
     std::vector<std::string> files;
     discoverDbFiles(dbname, files);
-    populateFileNameMap(files, &vbids);
+    populateFileNameMap(dbname, files, vbids, "couch");
 
     Db *db = NULL;
     couchstore_error_t errorCode;
@@ -319,13 +311,13 @@ void CouchKVStore::initialize() {
             logger.log(EXTENSION_LOG_WARNING, "Failed to open database file "
                        "%s/%" PRIu16 ".couch.%" PRIu64,
                        dbname.c_str(), id, rev);
-            remVBucketFromDbFileMap(id);
+            updateDbFileMap(id, 1);
             cachedVBStates[id] = NULL;
         }
 
         db = NULL;
         if (!isReadOnly()) {
-            removeCompactFile(dbname, id, rev);
+            removeCompactFile(getDBFileName(dbname, id, rev) + ".compact");
         }
     }
 }
@@ -390,6 +382,7 @@ void CouchKVStore::set(const Item &itm, Callback<mutation_result> &cb) {
 
 void CouchKVStore::get(const std::string &key, uint16_t vb,
                        Callback<GetValue> &cb, bool fetchDelete) {
+
     Db *db = NULL;
     GetValue rv;
     uint64_t fileRev = dbFileRevMap[vb];
@@ -629,14 +622,6 @@ void CouchKVStore::getPersistedStats(std::map<std::string,
     }
 
     delete[] buffer;
-}
-
-static std::string getDBFileName(const std::string &dbname,
-                                 uint16_t vbid,
-                                 uint64_t rev) {
-    std::stringstream ss;
-    ss << dbname << "/" << vbid << ".couch." << rev;
-    return ss.str();
 }
 
 static int edit_docinfo_hook(DocInfo **info, const sized_buf *item) {
@@ -1066,7 +1051,7 @@ bool CouchKVStore::getStat(const char* name, size_t& value)  {
 void CouchKVStore::pendingTasks() {
     if (isReadOnly()) {
         throw std::logic_error("CouchKVStore::pendingTasks: Not valid on a "
-                        "read-only object.");
+                                "read-only object.");
     }
 
     if (!pendingFileDeletions.empty()) {
@@ -1100,7 +1085,7 @@ ScanContext* CouchKVStore::initScanContext(std::shared_ptr<Callback<GetValue> > 
         logger.log(EXTENSION_LOG_WARNING, "Failed to open database, "
                    "name=%s/%" PRIu16 ".couch.%" PRIu64,
                    dbname.c_str(), vbid, rev);
-        remVBucketFromDbFileMap(vbid);
+        updateDbFileMap(vbid, 1);
         return NULL;
     }
 
@@ -1191,7 +1176,7 @@ scan_error_t CouchKVStore::scan(ScanContext* ctx) {
                        "couchstore_changes_since failed, error=%s [%s]",
                        couchstore_strerror(errorCode),
                        couchkvstore_strerrno(db, errorCode).c_str());
-            remVBucketFromDbFileMap(ctx->vbid);
+            updateDbFileMap(ctx->vbid, 1);
             return scan_failed;
         }
     }
@@ -1282,17 +1267,6 @@ uint64_t CouchKVStore::checkNewRevNum(std::string &dbFileName, bool newFile) {
         }
     }
     return newrev;
-}
-
-void CouchKVStore::updateDbFileMap(uint16_t vbucketId, uint64_t newFileRev) {
-    if (vbucketId >= numDbFiles) {
-        logger.log(EXTENSION_LOG_WARNING,
-                   "Cannot update db file map for an invalid vbucket, "
-                   "vbucket id = %d, rev = %" PRIu64, vbucketId, newFileRev);
-        return;
-    }
-
-    dbFileRevMap[vbucketId] = newFileRev;
 }
 
 couchstore_error_t CouchKVStore::openDB(uint16_t vbucketId,
@@ -1415,68 +1389,6 @@ couchstore_error_t CouchKVStore::openDB_retry(std::string &dbfile,
         }
     }
     return errCode;
-}
-
-void CouchKVStore::populateFileNameMap(std::vector<std::string> &filenames,
-                                       std::vector<uint16_t> *vbids) {
-    std::vector<std::string>::iterator fileItr;
-
-    for (fileItr = filenames.begin(); fileItr != filenames.end(); ++fileItr) {
-        const std::string &filename = *fileItr;
-        size_t secondDot = filename.rfind(".");
-        std::string nameKey = filename.substr(0, secondDot);
-        size_t firstDot = nameKey.rfind(".");
-#ifdef _MSC_VER
-        size_t firstSlash = nameKey.rfind("\\");
-#else
-        size_t firstSlash = nameKey.rfind("/");
-#endif
-
-        std::string revNumStr = filename.substr(secondDot + 1);
-        char *ptr = NULL;
-        uint64_t revNum = strtoull(revNumStr.c_str(), &ptr, 10);
-
-        std::string vbIdStr = nameKey.substr(firstSlash + 1,
-                                            (firstDot - firstSlash) - 1);
-        if (allDigit(vbIdStr)) {
-            int vbId = atoi(vbIdStr.c_str());
-            if (vbids) {
-                vbids->push_back(static_cast<uint16_t>(vbId));
-            }
-            uint64_t old_rev_num = dbFileRevMap[vbId];
-            if (old_rev_num == revNum) {
-                continue;
-            } else if (old_rev_num < revNum) { // stale revision found
-                dbFileRevMap[vbId] = revNum;
-            } else { // stale file found (revision id has rolled over)
-                old_rev_num = revNum;
-            }
-            std::stringstream old_file;
-            old_file << dbname << "/" << vbId << ".couch." << old_rev_num;
-            if (access(old_file.str().c_str(), F_OK) == 0) {
-                if (!isReadOnly()) {
-                    if (remove(old_file.str().c_str()) == 0) {
-                        logger.log(EXTENSION_LOG_INFO, "Removed stale file '%s'",
-                                   old_file.str().c_str());
-                    } else {
-                        logger.log(EXTENSION_LOG_WARNING,
-                                   "Warning: Failed to remove the stale file '%s': %s",
-                                   old_file.str().c_str(), cb_strerror().c_str());
-                    }
-                } else {
-                    logger.log(EXTENSION_LOG_WARNING,
-                               "A read-only instance of the underlying store "
-                               "was not allowed to delete a stale file: %s!",
-                               old_file.str().c_str());
-                }
-            }
-        } else {
-            // skip non-vbucket database file, master.couch etc
-            logger.log(EXTENSION_LOG_DEBUG,
-                       "Non-vbucket database file, %s, skip adding "
-                       "to CouchKVStore dbFileMap\n", filename.c_str());
-        }
-    }
 }
 
 couchstore_error_t CouchKVStore::fetchDoc(Db *db, DocInfo *docinfo,
@@ -1864,18 +1776,6 @@ couchstore_error_t CouchKVStore::saveDocs(uint16_t vbid, uint64_t rev,
     }
 
     return errCode;
-}
-
-void CouchKVStore::remVBucketFromDbFileMap(uint16_t vbucketId) {
-    if (vbucketId >= numDbFiles) {
-        logger.log(EXTENSION_LOG_WARNING,
-                   "Cannot remove db file map entry for an invalid vbucket, "
-                   "vbucket id = %d\n", vbucketId);
-        return;
-    }
-
-    // just reset revision number of the requested vbucket
-    dbFileRevMap[vbucketId] = 1;
 }
 
 void CouchKVStore::commitCallback(std::vector<CouchRequest *> &committedReqs,
@@ -2475,27 +2375,10 @@ void CouchKVStore::unlinkCouchFile(uint16_t vbucket,
     }
 }
 
-void CouchKVStore::removeCompactFile(const std::string &dbname,
-                                     uint16_t vbid,
-                                     uint64_t fileRev) {
-
-    std::string dbfile = getDBFileName(dbname, vbid, fileRev);
-    std::string compact_file = dbfile + ".compact";
-
-    if (!isReadOnly()) {
-        removeCompactFile(compact_file);
-    } else {
-        logger.log(EXTENSION_LOG_WARNING,
-                   "A read-only instance of the underlying store was not "
-                   "allowed to delete a temporary file: %s",
-                   compact_file.c_str());
-    }
-}
-
 void CouchKVStore::removeCompactFile(const std::string &filename) {
     if (isReadOnly()) {
         throw std::logic_error("CouchKVStore::removeCompactFile: Not valid on "
-                "a read-only object.");
+                               "a read-only object.");
     }
 
     if (access(filename.c_str(), F_OK) == 0) {

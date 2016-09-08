@@ -592,16 +592,6 @@ const Flusher* EPBucket::getFlusher(uint16_t shardId) {
     return vbMap.shards[shardId]->getFlusher();
 }
 
-uint16_t EPBucket::getCommitInterval(uint16_t shardId) {
-    Flusher *flusher = vbMap.shards[shardId]->getFlusher();
-    return flusher->getCommitInterval();
-}
-
-uint16_t EPBucket::decrCommitInterval(uint16_t shardId) {
-    Flusher *flusher = vbMap.shards[shardId]->getFlusher();
-    return flusher->decrCommitInterval();
-}
-
 Warmup* EPBucket::getWarmup(void) const {
     return warmupTask;
 }
@@ -3083,8 +3073,7 @@ int EPBucket::flushVBucket(uint16_t vbid) {
              * writes perfomed. Hence, a commit is not explicitly performed on
              * each flushVBucket call.
              */
-            if ((items_flushed > 0) &&
-                (decrCommitInterval(shard->getId()) == 0)) {
+            if (items_flushed > 0) {
 
                 commit(shard->getId());
 

@@ -257,15 +257,6 @@ public:
     void getMulti(uint16_t vb, vb_bgfetch_queue_t &itms) override;
 
     /**
-     * Get the number of vbuckets in a single database file
-     *
-     * returns - the number of vbuckets in a database file
-     */
-    uint16_t getNumVbsPerFile(void) override {
-        return 1;
-    }
-
-    /**
      * Delete a given document from the underlying storage system.
      *
      * @param itm instance representing the document to be deleted
@@ -430,10 +421,6 @@ protected:
     bool commit2couchstore();
 
     uint64_t checkNewRevNum(std::string &dbname, bool newFile = false);
-    void populateFileNameMap(std::vector<std::string> &filenames,
-                             std::vector<uint16_t> *vbids);
-    void remVBucketFromDbFileMap(uint16_t vbucketId);
-    void updateDbFileMap(uint16_t vbucketId, uint64_t newFileRev);
     couchstore_error_t openDB(uint16_t vbucketId, uint64_t fileRev, Db **db,
                               uint64_t options, uint64_t *newFileRev = NULL,
                               bool reset=false, FileOpsInterface* ops = nullptr);
@@ -458,26 +445,13 @@ protected:
 
     /**
      * Remove compact file
-     *
-     * @param dbname
-     * @param vbucket id
-     * @param current db rev number
+     * @param filename
      */
-    void removeCompactFile(const std::string &dbname, uint16_t vbid,
-                           uint64_t currentRev);
-
     void removeCompactFile(const std::string &filename);
 
     const std::string dbname;
 
-    // Map of the fileRev for each vBucket. Using RelaxedAtomic so
-    // stats gathering (doDcpVbTakeoverStats) can get a snapshot
-    // without having to lock.
-    std::vector<Couchbase::RelaxedAtomic<uint64_t>> dbFileRevMap;
-
-    uint16_t numDbFiles;
     std::vector<CouchRequest *> pendingReqsQ;
-    bool intransaction;
 
     /**
      * FileOpsInterface implementation for couchstore which tracks
@@ -495,19 +469,12 @@ protected:
      */
     std::unique_ptr<FileOpsInterface> statCollectingFileOpsCompaction;
 
-    /* deleted docs in each file, indexed by vBucket. RelaxedAtomic
-       to allow stats access witout lock */
-    std::vector<Couchbase::RelaxedAtomic<size_t>> cachedDeleteCount;
-    std::vector<Couchbase::RelaxedAtomic<uint64_t>> cachedFileSize;
-    std::vector<Couchbase::RelaxedAtomic<uint64_t>> cachedSpaceUsed;
     /* pending file deletions */
     AtomicQueue<std::string> pendingFileDeletions;
 
     std::atomic<size_t> scanCounter; //atomic counter for generating scan id
     std::map<size_t, Db*> scans; //map holding active scans
     std::mutex scanLock; //lock guarding the scan map
-
-    Logger& logger;
 
     /**
      * Base fileops implementation to be wrapped by stat collecting fileops

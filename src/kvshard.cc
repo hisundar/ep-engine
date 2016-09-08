@@ -36,16 +36,17 @@ KVShard::KVShard(uint16_t id, KVBucket& store) :
 
     vbuckets.resize(maxVbuckets);
 
-    std::string backend = kvConfig.getBackend();
-    uint16_t commitInterval = 1;
+    std::string backend(kvConfig.getBackend());
 
     if (backend.compare("couchdb") == 0) {
         rwUnderlying = KVStoreFactory::create(kvConfig, false);
         roUnderlying = KVStoreFactory::create(kvConfig, true);
     } else if (backend.compare("forestdb") == 0) {
-        rwUnderlying = KVStoreFactory::create(kvConfig);
+        rwUnderlying = KVStoreFactory::create(kvConfig, false);
         roUnderlying = rwUnderlying;
-        commitInterval = config.getMaxVbuckets()/config.getMaxNumShards();
+    } else {
+        throw std::invalid_argument("Unknown underlying store: " +
+                                    backend);
     }
 
     /* [EPHE TODO]: Try to avoid dynamic cast */
@@ -54,7 +55,7 @@ KVShard::KVShard(uint16_t id, KVBucket& store) :
     if (epstore) {
         /* We want Flusher and BgFetcher only in case of epstore not
            ephemeral store */
-        flusher = new Flusher(epstore, this, commitInterval);
+        flusher = new Flusher(epstore, this);
         bgFetcher = new BgFetcher(epstore, this, stats);
     }
 }

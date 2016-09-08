@@ -645,7 +645,11 @@ protected:
 class KVStore {
 public:
     KVStore(KVStoreConfig &config, bool read_only = false)
-        : configuration(config), readOnly(read_only) {}
+        : configuration(config),
+          readOnly(read_only),
+          intransaction(false),
+          logger(config.getLogger())
+    { }
 
     virtual ~KVStore() {}
 
@@ -742,7 +746,9 @@ public:
      *
      * returns - the number of vbuckets in the file
      */
-    virtual uint16_t getNumVbsPerFile(void) = 0;
+    virtual uint16_t getNumVbsPerFile(void) {
+        return 1;
+    }
 
     /**
      * Delete an item from the kv store.
@@ -913,11 +919,28 @@ protected:
     KVStoreConfig& configuration;
     bool readOnly;
     std::vector<vbucket_state *> cachedVBStates;
+
+    // Number of DbFiles accomodated by this KVStore instance
+    uint16_t numDbFiles;
+    bool intransaction;
+
+    // Map of the fileRev for each vBucket. Using RelaxedAtomic so
+    // stats gathering (doDcpVbTakeoverStats) can get a snapshot
+    // without having to lock.
+    std::vector<Couchbase::RelaxedAtomic<uint64_t>> dbFileRevMap;
+
     /* non-deleted docs in each file, indexed by vBucket.
        RelaxedAtomic to allow stats access without lock. */
     std::vector<Couchbase::RelaxedAtomic<size_t>> cachedDocCount;
-    Couchbase::RelaxedAtomic<uint16_t> cachedValidVBCount;
+    /* deleted docs in each file, indexed by vBucket. RelaxedAtomic
+       to allow stats access witout lock */
+    std::vector<Couchbase::RelaxedAtomic<size_t>> cachedDeleteCount;
+    std::vector<Couchbase::RelaxedAtomic<uint64_t>> cachedFileSize;
+    std::vector<Couchbase::RelaxedAtomic<uint64_t>> cachedSpaceUsed;
+
     std::list<PersistenceCallback *> pcbs;
+
+    Logger& logger;
 
 protected:
 
@@ -935,6 +958,24 @@ protected:
      * @return true if the cached vbucket state is updated
      */
     bool updateCachedVBState(uint16_t vbid, const vbucket_state& vbState);
+
+    /**
+     * Updates dbFileRevMap and populates vbids with relevant vbuckets.
+     *
+     * @param dbname file path
+     * @param filenames vector of filenames
+     * @param vbids vector of vbucket ids
+     * @param filename_suffix: "couch" for couchstore, "fdb" for forestdb
+     */
+    void populateFileNameMap(std::string dbname,
+                             std::vector<std::string> &filenames,
+                             std::vector<uint16_t> &vbids,
+                             std::string filename_suffix);
+
+    /**
+     * Updates the dbFileRevMap entry for the vbucket to the provided value.
+     */
+    void updateDbFileMap(uint16_t vbucketId, uint64_t newFileRev);
 };
 
 /**

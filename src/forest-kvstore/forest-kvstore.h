@@ -19,7 +19,14 @@
 #define SRC_FOREST_KVSTORE_FOREST_KVSTORE_H_ 1
 
 #include "libforestdb/forestdb.h"
+
+#include <string>
+#include <vector>
+
+#include <platform/strerror.h>
+
 #include "kvstore.h"
+#include "atomicqueue.h"
 
 //Maximum length of a key
 const size_t MAX_KEY_LENGTH = 250;
@@ -77,11 +84,6 @@ private:
 
 #define forestMetaOffset(field) offsetof(ForestMetaData, field)
 
-enum class handleType {
-    READER,
-    WRITER
-};
-
 /**
  * Class representing a document to be persisted in ForestDB.
  */
@@ -131,8 +133,9 @@ class ForestKVStore : public KVStore
      * Constructor
      *
      * @param config    Configuration information
+     * @param read_only True if kvstore is for Read-Only operations
      */
-    ForestKVStore(KVStoreConfig& config);
+    ForestKVStore(KVStoreConfig& config, bool read_only);
 
     /**
      * Copy constructor
@@ -145,6 +148,8 @@ class ForestKVStore : public KVStore
      * Destructor
      */
     ~ForestKVStore();
+
+    void initialize();
 
     /**
      * Reset database to a clean state.
@@ -225,15 +230,6 @@ class ForestKVStore : public KVStore
     void getMulti(uint16_t vb, vb_bgfetch_queue_t& itms) override;
 
     /**
-     * Get the number of the vbuckets in the underlying database file
-     *
-     * returns - the number of vbuckets in the file
-     */
-    uint16_t getNumVbsPerFile(void) override {
-        return cachedValidVBCount.load();
-    }
-
-    /**
      * Delete a given document from the underlying storage system.
      *
      * @param itm instance representing the document to be deleted
@@ -272,13 +268,28 @@ class ForestKVStore : public KVStore
     bool compactDB(compaction_ctx* ctx) override;
 
     /**
+     * Sets the Kvs handle to be used during compaction's callback
+     * invocation.
+     */
+    void setCompactionCbCtxHandle(uint16_t vbid, fdb_kvs_handle* handle) {
+        compactCBKvsHandles[vbid] = handle;
+    }
+
+    /**
+     * Gets the Kvs handle set for compaction's callback context.
+     */
+    fdb_kvs_handle* getCompactionCbCtxHandle(uint16_t vbid) {
+        return compactCBKvsHandles[vbid];
+    }
+
+    /**
      * Return the database file id from the compaction request
      * @param compact_req request structure for compaction
      *
      * return database file id
      */
     uint16_t getDBFileId(const protocol_binary_request_compact_db& req) override {
-        return ntohs(req.message.body.db_file_id);
+        return ntohs(req.message.header.request.vbucket);
     }
 
     /**
@@ -360,9 +371,7 @@ class ForestKVStore : public KVStore
     RollbackResult rollback(uint16_t vbid, uint64_t rollbackSeqno,
                             std::shared_ptr<RollbackCB> cb) override;
 
-    void pendingTasks() override {
-        return;
-    }
+    void pendingTasks() override;
 
     uint64_t getLastPersistedSeqno(uint16_t vbid) {
         return 0;
@@ -403,59 +412,94 @@ class ForestKVStore : public KVStore
 
     bool getStat(const char* name, size_t& value) override;
 
-private:
-    bool intransaction;
-    const std::string dbname;
-    std::atomic<uint64_t> dbFileRevNum;
-    std::string dbFileNameStr;
-    /* ForestDB file handle for the reader tasks. Used
-     * primarily by the bgFetcher task.
+    /**
+     * Handle types
      */
-    fdb_file_handle* readDBFileHandle;
-    /* ForestDB file handle for the writer tasks. Used
-     * by tasks that write data (flusher), deletes vbuckets,
-     * snapshotting vbucket state */
-    fdb_file_handle* writeDBFileHandle;
-    std::unordered_map<uint16_t, fdb_kvs_handle *> writeHandleMap;
-    std::unordered_map<uint16_t, fdb_kvs_handle *> readHandleMap;
-    std::vector<Couchbase::RelaxedAtomic<size_t>> cachedDeleteCount;
-    Couchbase::RelaxedAtomic<uint64_t> cachedFileSize;
-    Couchbase::RelaxedAtomic<uint64_t> cachedSpaceUsed;
-    fdb_kvs_handle* readVbStateHandle;
-    fdb_kvs_handle* writeVbStateHandle;
-    fdb_config fileConfig;
-    fdb_kvs_config kvsConfig;
-    std::vector<ForestRequest *> pendingReqsQ;
+    enum class HandleType {
+        READER,         // Read-only FDB/KV handles
+        WRITER,         // Read-Write FDB/KV handles
+        STATE_SNAP      // STATE SNAPSHOT FDB/KV handles
+    };
+
+private:
     static std::mutex initLock;
     static int numGlobalFiles;
+
+    const std::string dbname;
+
+    // File Config
+    fdb_config fileConfig;
+    // KVS Config
+    fdb_kvs_config kvsConfig;
+
+    // Map of vb ids to FDB regular KV handles used for RW ops
+    std::vector<std::shared_ptr<ForestKvsHandle>> rwFKvsHandleMap;
+    // Map of vb ids to FDB regular KV handles used for RO ops
+    std::vector<std::shared_ptr<ForestKvsHandle>> roFKvsHandleMap;
+    // Map of vb ids to FDB default KV handles used for state snapshot ops
+    std::vector<std::shared_ptr<ForestKvsHandle>> stateFKvsHandleMap;
+
+    std::vector<ForestRequest *> pendingReqsQ;
+
+    // FileOpsInterface implementation for forestDB
+    fdb_filemgr_ops_t statCollectingFileOps;
+
+    // Pending file deletions
+    AtomicQueue<std::string> pendingFileDeletions;
+
     std::atomic<size_t> scanCounter; //atomic counter for generating scan id
     std::map<size_t, std::unique_ptr<ForestKvsHandle>> scans; //map holding active scans
     std::mutex scanLock; //lock guarding the scan map
-    fdb_filemgr_ops_t statCollectingFileOps;
-    /* guard for the writer tasks to synchronize access to writeDBFileHandle */
-    std::mutex writerLock;
-    /* guard to synchronize access between compactor task to close the handle
-     * and another thread to create a new ForestDB handle
-     */
-    std::mutex handleLock;
+
+    // Pointers to KV store handle that is set at the start of compaction and is
+    // used within the compaction callback, is reset when compaction completes.
+    std::vector<fdb_kvs_handle*> compactCBKvsHandles;
+
+    std::vector<Couchbase::RelaxedAtomic<size_t>> cachedBlockCacheHits;
+    std::vector<Couchbase::RelaxedAtomic<size_t>> cachedBlockCacheMisses;
 
 private:
     void close();
     fdb_config getFileConfig();
     fdb_kvs_config getKVConfig();
+
+    /**
+     * Initializes forestDB.
+     */
     void initForestDb();
+
+    /**
+     * Shuts down forestDB.
+     */
     void shutdownForestDb();
+
     ENGINE_ERROR_CODE readVBState(uint16_t vbId);
+    bool setVBucketState(uint16_t vbId, vbucket_state* vbState);
+    void updateFileInfo(ForestKvsHandle* fKvsHandle, uint16_t vbId);
     void commitCallback(std::vector<ForestRequest *>& committedReqs);
-    fdb_kvs_handle* getOrCreateKvsHandle(uint16_t vbId, handleType htype);
-    fdb_kvs_handle* getKvsHandle(uint16_t vbId, handleType htype);
-    fdb_kvs_handle* getOneRWKvsHandle();
-    std::unique_ptr<ForestKvsHandle> createKvsHandle(uint16_t vbId);
-    fdb_kvs_handle* openKvsHandle(fdb_file_handle& fileHandle, char* kvsName);
     bool save2forestdb();
-    void updateFileInfo();
+
+    /**
+     * Fetches a handle pair from the specified list, if handle pair
+     * is unavailable, a new set of handles are initialized and added
+     * to the list, and then returned.
+     */
+    std::shared_ptr<ForestKvsHandle> getOrCreateFKvsHandle(uint16_t vbId,
+                                                           HandleType type);
+
+    /**
+     * Creates a new handle pair: file handle and kvs handle.
+     */
+    ForestKvsHandle* createFKvsHandle(uint16_t vbId, bool defaultKVS = false);
+
+    /**
+     * Creates a new KVS Handle
+     */
+    fdb_kvs_handle* openKvsHandle(fdb_file_handle& fileHandle, uint16_t vbId,
+                                  bool defaultKVS = false);
+
     fdb_filemgr_ops_t getForestStatOps(FileStats* stats);
-    GetValue docToItem(fdb_kvs_handle *kvsHandle, fdb_doc *rdoc, uint16_t vbId,
+    GetValue docToItem(fdb_kvs_handle* kvsHandle, fdb_doc *rdoc, uint16_t vbId,
                        bool metaOnly = false, bool fetchDelete = false);
     ENGINE_ERROR_CODE forestErr2EngineErr(fdb_status errCode);
     size_t getNumItems(fdb_kvs_handle* kvsHandle,

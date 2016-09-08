@@ -54,9 +54,8 @@ class KVShard;
 class Flusher {
 public:
 
-    Flusher(EPBucket* st, KVShard* k, uint16_t commitInt) :
+    Flusher(EPBucket* st, KVShard* k) :
         store(st), _state(initializing), taskId(0), minSleepTime(0.1),
-        initCommitInterval(commitInt), currCommitInterval(commitInt),
         forceShutdownReceived(false), doHighPriority(false), numHighPriority(0),
         pendingMutation(false), shard(k) { }
 
@@ -90,16 +89,6 @@ public:
     }
     void setTaskId(size_t newId) { taskId = newId; }
 
-    uint16_t getCommitInterval(void) {
-        return currCommitInterval;
-    }
-
-    uint16_t decrCommitInterval(void);
-
-    void resetCommitInterval(void) {
-        currCommitInterval = initCommitInterval;
-    }
-
 private:
     bool transition_state(enum flusher_state to);
     void flushVB();
@@ -125,6 +114,7 @@ private:
     double                   minSleepTime;
     uint16_t                 initCommitInterval;
     uint16_t                 currCommitInterval;
+    rel_time_t               flushStart;
     std::atomic<bool> forceShutdownReceived;
     std::queue<uint16_t> hpVbs;
     std::queue<uint16_t> lpVbs;
