@@ -170,6 +170,13 @@ public:
      */
     static TaskPriority getTaskPriority(TaskId id);
 
+    /**
+     * A simple clock monotonically increasing
+     */
+    void setEnqueueTick(uint64_t newTick) {
+        enqueueTick = newTick;
+    }
+
     /*
      * A vector of all TaskId generated from tasks.def.h
      */
@@ -180,6 +187,7 @@ protected:
     std::atomic<task_state_t> state;
     const size_t uid;
     TaskId typeId;
+    uint64_t enqueueTick;
     TaskPriority priority;
     EventuallyPersistentEngine *engine;
     Taskable& taskable;
@@ -203,14 +211,15 @@ private:
 typedef SingleThreadedRCPtr<GlobalTask> ExTask;
 
 /**
- * Order tasks by their priority and taskId (try to ensure FIFO)
- * @return true if t2 should have priority over t1
+ * Order tasks by their priority and time they were added to the readyQueue
+ * (to ensure FIFO)
+ * @return true if t2 should have priority over t1 or t2 was ready first
  */
 class CompareByPriority {
 public:
     bool operator()(ExTask &t1, ExTask &t2) {
         return (t1->getQueuePriority() == t2->getQueuePriority()) ?
-               (t1->uid > t2->uid) :
+               (t1->enqueueTick > t2->enqueueTick) :
                (t1->getQueuePriority() > t2->getQueuePriority());
     }
 };
@@ -225,3 +234,4 @@ public:
         return t2->waketime < t1->waketime;
     }
 };
+

@@ -115,9 +115,11 @@ void ExecutorThread::run() {
             currentTask->setState(TASK_RUNNING, TASK_SNOOZED);
             bool again = currentTask->run();
 
+            // Update current time of thread after task run..
+            updateCurrentTime();
+
             // Task done, log it ...
-            const ProcessClock::duration runtime(ProcessClock::now() -
-                                                 getTaskStart());
+            const ProcessClock::duration runtime(ProcessClock::now() - getTaskStart());
             currentTask->getTaskable().logRunTime(currentTask->getTypeId(),
                                                   runtime);
             if (engine) {

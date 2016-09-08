@@ -88,6 +88,9 @@ private:
     FutureQueue<> futureQueue;
 
     std::list<ExTask> pendingQueue;
+
+    // monotonically increased when readyQ is touched
+    uint64_t queueTick;
 };
 
 #endif  // SRC_TASKQUEUE_H_

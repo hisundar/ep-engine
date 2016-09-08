@@ -47,6 +47,7 @@ GlobalTask::GlobalTask(Taskable& t,
         state(TASK_RUNNING),
         uid(nextTaskId()),
         typeId(taskId),
+        enqueueTick(0),
         engine(NULL),
         taskable(t) {
     priority = getTaskPriority(taskId);
