@@ -457,6 +457,9 @@ private:
 
     std::vector<Couchbase::RelaxedAtomic<size_t>> cachedBlockCacheHits;
     std::vector<Couchbase::RelaxedAtomic<size_t>> cachedBlockCacheMisses;
+    std::vector<Couchbase::RelaxedAtomic<size_t>> cachedBlockCacheNumItems;
+    std::vector<Couchbase::RelaxedAtomic<size_t>> cachedBlockCacheNumVictims;
+    std::vector<Couchbase::RelaxedAtomic<size_t>> cachedBlockCacheNumImmutables;
 
 private:
     void close();

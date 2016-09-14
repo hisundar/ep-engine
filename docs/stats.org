@@ -1182,6 +1182,9 @@ The following stats are available for the CouchStore database engine:
 | io_compaction_write_bytes | Number of bytes written (compaction only, includes Couchstore B-Tree and other overheads) |
 | block_cache_hits          | Number of block cache hits in buffer cache provided by underlying store                   |
 | block_cache_misses        | Number of block cache misses in buffer cache provided by underlying store                 |
+| block_cache_num_items     | Number of block cache items for underlying store                                          |
+| block_cache_num_victims   | Number of block cache victims (evicted items) for underlying store                        |
+| block_cache_num_immutables| Number of block cache immutables (eligible for eviction) for underlying store             |
 
 ** KV Store Timing Stats
 

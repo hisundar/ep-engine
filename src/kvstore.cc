@@ -337,6 +337,23 @@ void KVStore::addStats(ADD_STAT add_stat, const void *c) {
             st.fsStatsCompaction.totalBytesRead, add_stat, c);
     addStat(prefix, "io_compaction_write_bytes",
             st.fsStatsCompaction.totalBytesWritten, add_stat, c);
+
+    size_t value = 0;
+    if (getStat("Block_cache_hits", value)) {
+        addStat(prefix, "block_cache_hits", value, add_stat, c);
+    }
+    if (getStat("Block_cache_misses", value)) {
+        addStat(prefix, "block_cache_misses", value, add_stat, c);
+    }
+    if (getStat("Block_cache_num_items", value)) {
+        addStat(prefix, "block_cache_num_items", value, add_stat, c);
+    }
+    if (getStat("Block_cache_num_items", value)) {
+        addStat(prefix, "block_cache_num_victims", value, add_stat, c);
+    }
+    if (getStat("Block_cache_num_items", value)) {
+        addStat(prefix, "block_cache_num_immutables", value, add_stat, c);
+    }
 }
 
 void KVStore::addTimingStats(ADD_STAT add_stat, const void *c) {
