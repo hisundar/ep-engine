@@ -125,6 +125,18 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config, bool read_only)
 
     fileConfig.custom_file_ops = &statCollectingFileOps;
 
+    /* Set the buffer cache value to 6 GiB for performance */
+    fileConfig.buffercache_size = 6442450944;
+
+    /* Setting WAL threshold to 4K */
+    fileConfig.wal_threshold = 4096;
+
+    /* Disable block reuse */
+    fileConfig.block_reusing_threshold = 100;
+
+    /* Enabling auto commit */
+    fileConfig.auto_commit = true;
+
     // init db file map with default revision number, 1
     numDbFiles = configuration.getMaxVBuckets();
     cachedVBStates.reserve(numDbFiles);
