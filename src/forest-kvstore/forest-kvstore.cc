@@ -126,14 +126,19 @@ ForestKVStore::ForestKVStore(KVStoreConfig &config, bool read_only)
     fileConfig.custom_file_ops = &statCollectingFileOps;
 
     /* Set the buffer cache value to 6 GiB for performance */
+    //fileConfig.buffercache_size = 3221225472;
     fileConfig.buffercache_size = 6442450944;
     //fileConfig.buffercache_size = 2 * 1024 * 1024 * 1024;
 
     /* Setting WAL threshold to 4K */
     fileConfig.wal_threshold = 4096;
 
-    /* Disable block reuse */
-    fileConfig.block_reusing_threshold = 100;
+    /* CBR set to 75% */
+    fileConfig.block_reusing_threshold = 75;
+
+    /* Set WAL & Bnode cache shards to 7 since we have 4 shards in epe */
+    fileConfig.num_wal_partitions = 7;
+    fileConfig.num_bcache_partitions = 7;
 
     /* Disable wal flush before commit */
     fileConfig.wal_flush_before_commit = false;
